@@ -19,7 +19,7 @@ echo "nameserver 192.168.122.1" > /etc/resolv.conf
 apt update
 apt install -y isc-dhcp-server nano
 nano /etc/default/isc-dhcp-server
-nano /etc/dhcp.conf
+nano /etc/dhcp/dhcpd.conf
 ```
 ```bash
 INTERFACESv4="eth0"
