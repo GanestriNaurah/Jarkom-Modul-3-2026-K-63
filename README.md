@@ -649,3 +649,1081 @@ subnet 10.95.3.0 netmask 255.255.255.0 {
   }
 }
 ```
+
+## Soal 11
+
+DNS master-slave untuk zona `jujutsu.k63.com`: utahime (`10.95.1.2`) sebagai master, shoko (`10.95.1.3`) sebagai slave.
+
+```bash
+# utahime: install BIND9
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update
+apt-get install -y bind9 bind9utils dnsutils
+```
+```bash
+# shoko: install BIND9
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update
+apt-get install -y bind9 bind9utils dnsutils
+```
+```bash
+# utahime (master): zone file
+cat > /etc/bind/db.jujutsu.k63.com << 'EOF'
+$TTL 86400
+@   IN  SOA  ns1.jujutsu.k63.com. admin.jujutsu.k63.com. (
+        2024101501 ; Serial
+        3600       ; Refresh
+        1800       ; Retry
+        604800     ; Expire
+        86400 )    ; Minimum TTL
+
+@       IN  NS   ns1.jujutsu.k63.com.
+@       IN  NS   ns2.jujutsu.k63.com.
+
+ns1     IN  A    10.95.1.2
+ns2     IN  A    10.95.1.3
+EOF
+
+# utahime (master): named.conf.local
+cat > /etc/bind/named.conf.local << 'EOF'
+zone "jujutsu.k63.com" {
+    type master;
+    file "/etc/bind/db.jujutsu.k63.com";
+    allow-transfer { 10.95.1.3; };
+    also-notify { 10.95.1.3; };
+};
+EOF
+
+# validasi
+named-checkconf
+named-checkzone jujutsu.k63.com /etc/bind/db.jujutsu.k63.com
+
+# start bind9
+pkill named 2>/dev/null; sleep 1
+named -g &
+```
+```bash
+# shoko (slave): named.conf.local
+cat > /etc/bind/named.conf.local << 'EOF'
+zone "jujutsu.k63.com" {
+    type slave;
+    file "/etc/bind/db.jujutsu.k63.com";
+    masters { 10.95.1.2; };
+};
+EOF
+
+# validasi
+named-checkconf
+
+# start bind9
+pkill named 2>/dev/null; sleep 1
+named -g &
+```
+```bash
+# verifikasi dari client
+dig @10.95.1.2 jujutsu.k63.com
+dig @10.95.1.3 jujutsu.k63.com
+```
+```bash
+# bukti sinkronisasi serial
+# utahime (master): naikkan serial
+sed -i 's/2024101501/2024101502/' /etc/bind/db.jujutsu.k63.com
+pkill named && sleep 1 && named -g &
+
+# shoko (slave): cek serial berubah
+dig @10.95.1.3 jujutsu.k63.com SOA
+```
+
+## Soal 12
+
+A record domain utama ke gojo (`10.95.1.4`), CNAME `www`, reverse DNS (PTR), dan DNS forwarder. Semua perintah di utahime kecuali verifikasi.
+
+```bash
+# utahime: update zone file forward
+cat > /etc/bind/db.jujutsu.k63.com << 'EOF'
+$TTL 86400
+@   IN  SOA  ns1.jujutsu.k63.com. admin.jujutsu.k63.com. (
+        2024101503 ; Serial
+        3600       ; Refresh
+        1800       ; Retry
+        604800     ; Expire
+        86400 )    ; Minimum TTL
+
+@       IN  NS   ns1.jujutsu.k63.com.
+@       IN  NS   ns2.jujutsu.k63.com.
+
+; A Record - Domain utama ke gojo
+@       IN  A    10.95.1.4
+
+; CNAME - www merujuk ke domain utama
+www     IN  CNAME jujutsu.k63.com.
+
+; A Record untuk ns1 dan ns2
+ns1     IN  A    10.95.1.2
+ns2     IN  A    10.95.1.3
+EOF
+```
+```bash
+# utahime: reverse DNS zone (PTR)
+cat > /etc/bind/db.10.95.1 << 'EOF'
+$TTL 86400
+@   IN  SOA  ns1.jujutsu.k63.com. admin.jujutsu.k63.com. (
+        2024101501 ; Serial
+        3600       ; Refresh
+        1800       ; Retry
+        604800     ; Expire
+        86400 )    ; Minimum TTL
+
+@       IN  NS   ns1.jujutsu.k63.com.
+@       IN  NS   ns2.jujutsu.k63.com.
+
+; PTR Record - 10.95.1.4 → jujutsu.k63.com
+4       IN  PTR  jujutsu.k63.com.
+EOF
+```
+```bash
+# utahime: update named.conf.local
+cat > /etc/bind/named.conf.local << 'EOF'
+zone "jujutsu.k63.com" {
+    type master;
+    file "/etc/bind/db.jujutsu.k63.com";
+    allow-transfer { 10.95.1.3; };
+    also-notify { 10.95.1.3; };
+};
+
+zone "1.95.10.in-addr.arpa" {
+    type master;
+    file "/etc/bind/db.10.95.1";
+    allow-transfer { 10.95.1.3; };
+    also-notify { 10.95.1.3; };
+};
+EOF
+```
+```bash
+# utahime: aktifkan DNS forwarder
+cat > /etc/bind/named.conf.options << 'EOF'
+options {
+    directory "/var/cache/bind";
+    forwarders {
+        192.168.122.1;
+    };
+    recursion yes;
+    allow-query { any; };
+};
+EOF
+```
+```bash
+# utahime: validasi dan restart
+named-checkconf
+named-checkzone jujutsu.k63.com /etc/bind/db.jujutsu.k63.com
+named-checkzone 1.95.10.in-addr.arpa /etc/bind/db.10.95.1
+pkill named && sleep 1 && named -g &
+```
+```bash
+# verifikasi dari client
+
+# cek A record (domain -> IP gojo)
+dig @10.95.1.2 jujutsu.k63.com
+
+# cek CNAME (www -> domain utama)
+dig @10.95.1.2 www.jujutsu.k63.com
+
+# cek PTR (IP gojo -> domain)
+dig @10.95.1.2 -x 10.95.1.4
+
+# cek forwarder - ping domain internet
+ping google.com
+```
+
+## Soal 13
+
+Replikasi MariaDB: yaga (`10.95.4.9`) sebagai master, inumaki (`10.95.4.8`) sebagai slave, database `db_shibuya_k63`.
+
+```bash
+# yaga DAN inumaki: install MariaDB
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update
+apt-get install -y mariadb-server mariadb-client
+```
+```bash
+# yaga (master) - 10.95.4.9
+
+# buat direktori log dan file index
+mkdir -p /var/log/mysql
+touch /var/log/mysql/mysql-bin.index
+chown mysql:mysql /var/log/mysql
+chown mysql:mysql /var/log/mysql/mysql-bin.index
+
+# edit konfigurasi MariaDB
+cat > /etc/mysql/mariadb.conf.d/50-server.cnf << 'EOF'
+[mysqld]
+server-id = 1
+log-bin = /var/log/mysql/mysql-bin.log
+binlog_do_db = db_shibuya_k63
+bind-address = 0.0.0.0
+EOF
+
+# restart MariaDB
+service mariadb restart
+
+# buat database dan tabel
+mysql -u root << 'EOF'
+CREATE DATABASE IF NOT EXISTS db_shibuya_k63;
+USE db_shibuya_k63;
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    client_ip VARCHAR(45),
+    endpoint VARCHAR(255),
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+FLUSH PRIVILEGES;
+EOF
+
+# buat user replication
+mysql -u root << 'EOF'
+CREATE USER IF NOT EXISTS 'repl'@'10.95.4.%' IDENTIFIED BY 'repl_password';
+GRANT REPLICATION SLAVE ON *.* TO 'repl'@'10.95.4.%';
+FLUSH PRIVILEGES;
+EOF
+
+# grant remote access untuk Network 4
+mysql -u root << 'EOF'
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'10.95.4.%' IDENTIFIED BY 'root_password';
+FLUSH PRIVILEGES;
+EOF
+
+# cek status master
+mysql -u root -e "SHOW MASTER STATUS;"
+```
+```bash
+# inumaki (slave) - 10.95.4.8
+
+# buat direktori log
+mkdir -p /var/log/mysql
+chown mysql:mysql /var/log/mysql
+
+# edit konfigurasi MariaDB
+cat > /etc/mysql/mariadb.conf.d/50-server.cnf << 'EOF'
+[mysqld]
+server-id = 2
+bind-address = 0.0.0.0
+EOF
+
+# restart MariaDB
+service mariadb restart
+
+# buat database dan tabel (untuk menghindari error replikasi)
+mysql -u root << 'EOF'
+CREATE DATABASE IF NOT EXISTS db_shibuya_k63;
+USE db_shibuya_k63;
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    client_ip VARCHAR(45),
+    endpoint VARCHAR(255),
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+FLUSH PRIVILEGES;
+EOF
+
+# hubungkan slave ke master
+mysql -u root << 'EOF'
+CHANGE MASTER TO
+    MASTER_HOST='10.95.4.9',
+    MASTER_USER='repl',
+    MASTER_PASSWORD='repl_password',
+    MASTER_LOG_FILE='mysql-bin.000001',
+    MASTER_LOG_POS=940;
+START SLAVE;
+EOF
+
+# cek status slave
+mysql -u root -e "SHOW SLAVE STATUS\G"
+```
+```bash
+# verifikasi replikasi
+
+# yaga (master): masukkan data
+mysql -u root db_shibuya_k63 -e "INSERT INTO request_logs (client_ip, endpoint) VALUES ('10.95.2.10', '/api/test-replication');"
+
+# inumaki (slave): cek data
+mysql -u root db_shibuya_k63 -e "SELECT * FROM request_logs;"
+```
+```bash
+# verifikasi remote access dari node lain di Network 4 (misal tengen, geto, worker)
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update
+apt-get install -y mariadb-client
+
+# query dari node lain
+mysql -h 10.95.4.9 -u root -proot_password -e "SELECT * FROM db_shibuya_k63.request_logs;"
+```
+
+## Soal 14
+
+Web server worker: frontend (maki, panda) dan API (nanami, todo, kirara) dengan Nginx + PHP-FPM. Frontend hanya boleh diakses dari gojo, API hanya dari geto.
+
+```bash
+# gojo: fix IP (sebelumnya bentrok dengan shoko 10.95.1.3)
+ip addr del 10.95.1.3/24 dev eth0
+ip addr add 10.95.1.4/24 dev eth0
+ip route add default via 10.95.1.1
+cat > /etc/network/interfaces << 'ENDOFFILE'
+ auto eth0
+ iface eth0 inet static
+     address 10.95.1.4
+     netmask 255.255.255.0
+     gateway 10.95.1.1
+     dns-nameservers 192.168.122.1
+ENDOFFILE
+ip addr show eth0 | grep inet    # harus 10.95.1.4/24
+```
+```bash
+# semua worker (maki, panda, nanami, todo, kirara): install Nginx + PHP-FPM
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+apt-get update
+apt-get install -y nginx php-fpm php-mysql
+
+# start php-fpm (binary di trixie = php-fpm8.4)
+/usr/sbin/php-fpm8.4 -D
+```
+```bash
+# API worker (nanami, todo, kirara): direktori dan file API
+mkdir -p /var/www/api
+cat > /var/www/api/index.php << 'ENDOFFILE'
+<?php
+header('Content-Type: application/json');
+
+$servername = "10.95.4.9";
+$username = "root";
+$password = "root_password";
+$dbname = "db_shibuya_k63";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+
+if ($conn->connect_error) {
+    die(json_encode(["error" => "Connection failed"]));
+}
+
+$client_ip = $_SERVER['REMOTE_ADDR'];
+$endpoint = $_SERVER['REQUEST_URI'];
+
+$stmt = $conn->prepare("INSERT INTO request_logs (client_ip, endpoint) VALUES (?, ?)");
+$stmt->bind_param("ss", $client_ip, $endpoint);
+$stmt->execute();
+$stmt->close();
+
+$result = $conn->query("SELECT * FROM request_logs ORDER BY id DESC LIMIT 5");
+$logs = [];
+while ($row = $result->fetch_assoc()) {
+    $logs[] = $row;
+}
+
+$conn->close();
+
+echo json_encode([
+    "status" => "success",
+    "hostname" => gethostname(),
+    "client_ip" => $client_ip,
+    "recent_logs" => $logs
+]);
+ENDOFFILE
+
+# validasi syntax
+php -l /var/www/api/index.php
+```
+```bash
+# API worker (nanami, todo, kirara): virtual host API (HANYA dari geto 10.95.4.2)
+cat > /etc/nginx/sites-available/api << 'ENDOFFILE'
+server {
+    listen 80;
+    server_name api.jujutsu.k63.com;
+    root /var/www/api;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+    }
+
+    allow 10.95.4.2;
+    deny all;
+}
+ENDOFFILE
+
+ln -sf /etc/nginx/sites-available/api /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+service nginx restart
+```
+```bash
+# frontend worker (maki, panda): direktori dan file PHP
+mkdir -p /var/www/frontend
+cat > /var/www/frontend/index.php << 'ENDOFFILE'
+<?php
+echo "<h1>Frontend Worker</h1>";
+echo "<p>Hostname: " . gethostname() . "</p>";
+ENDOFFILE
+
+php -l /var/www/frontend/index.php
+```
+```bash
+# frontend worker (maki, panda): virtual host frontend (HANYA dari gojo 10.95.1.4)
+cat > /etc/nginx/sites-available/frontend << 'ENDOFFILE'
+server {
+    listen 80;
+    server_name jujutsu.k63.com www.jujutsu.k63.com;
+    root /var/www/frontend;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+    }
+
+    allow 10.95.1.4;
+    deny all;
+}
+ENDOFFILE
+
+ln -sf /etc/nginx/sites-available/frontend /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+service nginx restart
+```
+```bash
+# verifikasi
+
+# akses langsung dari worker (HARUS 403)
+curl http://localhost/
+curl http://10.95.4.3/     # dari maki
+curl http://10.95.4.5/     # dari nanami
+
+# geto ke API worker (HARUS BERHASIL)
+curl http://10.95.4.5/     # nanami
+curl http://10.95.4.6/     # todo
+curl http://10.95.4.7/     # kirara
+
+# gojo ke frontend (HARUS BERHASIL, pastikan IP gojo = 10.95.1.4)
+curl http://10.95.4.3/     # maki
+curl http://10.95.4.4/     # panda
+
+# geto ke frontend worker (HARUS 403 - tidak diizinkan)
+curl http://10.95.4.3/     # harus 403
+```
+
+## Soal 15
+
+Load balancer API di geto dengan Nginx upstream, weight 3:1 untuk nanami dan todo. Semua perintah di geto.
+
+```bash
+# geto: install Nginx dan curl
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+apt-get update
+apt-get install -y nginx curl
+```
+```bash
+# geto: upstream dan virtual host
+cat > /etc/nginx/sites-available/lb << 'ENDOFFILE'
+upstream api_cluster {
+    server 10.95.4.5 weight=3;
+    server 10.95.4.6 weight=1;
+}
+
+server {
+    listen 80;
+    server_name geto.jujutsu.k63.com;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+ENDOFFILE
+```
+```bash
+# geto: aktifkan dan restart
+ln -sf /etc/nginx/sites-available/lb /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+service nginx restart
+```
+```bash
+# geto: verifikasi distribusi beban
+
+# satu request berhasil
+curl http://localhost/
+
+# loop 20 request - cek rasio
+for i in $(seq 1 20); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+
+# loop 40 request - hasil lebih akurat
+for i in $(seq 1 40); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+```
+```bash
+# geto: verifikasi tambahan
+
+# cek nginx listening
+ss -tlnp | grep :80
+
+# cek config upstream
+nginx -T | grep -A5 upstream
+
+# cek akses dari node lain di Network 4
+curl http://10.95.4.2/
+```
+
+## Soal 16
+
+Reverse proxy di gojo dengan path-based routing: `/` ke frontend (maki, panda) secara round robin, `/api` ke geto.
+
+```bash
+# gojo: fix IP (bentrok dengan shoko 10.95.1.3)
+ip addr del 10.95.1.3/24 dev eth0
+ip addr add 10.95.1.4/24 dev eth0
+ip route add default via 10.95.1.1
+
+# verifikasi
+ip addr show eth0 | grep inet    # HARUS 10.95.1.4/24
+
+# konfigurasi permanen
+cat > /etc/network/interfaces << 'ENDOFFILE'
+auto eth0
+iface eth0 inet static
+    address 10.95.1.4
+    netmask 255.255.255.0
+    gateway 10.95.1.1
+    dns-nameservers 192.168.122.1
+ENDOFFILE
+```
+```bash
+# gojo: install Nginx
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+apt-get update
+apt-get install -y nginx
+```
+```bash
+# nanami, todo, DAN kirara: fix API worker supaya path /api tidak 404
+# (prasyarat: tanpa ini, request /api menghasilkan 404)
+cat > /etc/nginx/sites-available/api << 'ENDOFFILE'
+server {
+    listen 80;
+    server_name api.jujutsu.k63.com;
+    root /var/www/api;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+    }
+
+    allow 10.95.4.2;
+    deny all;
+}
+ENDOFFILE
+
+nginx -t && service nginx restart
+```
+```bash
+# gojo: path-based routing
+cat > /etc/nginx/sites-available/gojo << 'ENDOFFILE'
+upstream frontend_cluster {
+    server 10.95.4.3;
+    server 10.95.4.4;
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k63.com www.jujutsu.k63.com;
+
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api {
+        proxy_pass http://10.95.4.2;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+ENDOFFILE
+
+ln -sf /etc/nginx/sites-available/gojo /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+service nginx restart
+```
+```bash
+# geto: restart (upstream api_cluster sudah ada dari soal 15)
+service nginx restart
+```
+```bash
+# verifikasi
+
+# gojo: cek round robin
+for i in $(seq 1 10); do curl -s http://localhost/ | grep -o 'Hostname: [a-z]*'; done | sort | uniq -c
+
+# gojo: hasil lebih akurat
+for i in $(seq 1 100); do curl -s http://localhost/ | grep -o 'Hostname: [a-z]*'; done | sort | uniq -c
+
+# gojo: cek /api
+curl http://localhost/api
+
+# client Divisi A/B (zenin / okkotsu / kugisaki)
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+curl http://jujutsu.k63.com/
+curl http://www.jujutsu.k63.com/
+curl http://jujutsu.k63.com/api
+```
+
+## Soal 17
+
+Meneruskan IP client asli lewat header `X-Forwarded-For` dari gojo, geto, sampai API worker, lalu disimpan ke database.
+
+```bash
+# ino (Network 3): set IP manual kalau belum dapat DHCP
+ip addr add 10.95.3.2/24 dev eth0
+ip link set eth0 up
+ip route add default via 10.95.3.1
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+ip addr show eth0 | grep inet    # HARUS 10.95.3.2/24
+
+# zenin (Network 2): sudah DHCP, cek saja
+ip addr show eth0 | grep inet    # HARUS 10.95.2.4
+```
+```bash
+# gojo: teruskan header client IP
+cat > /etc/nginx/sites-available/gojo << 'ENDOFFILE'
+upstream frontend_cluster {
+    server 10.95.4.3;
+    server 10.95.4.4;
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k63.com www.jujutsu.k63.com;
+
+    # Percayai informasi IP dari proxy terpercaya
+    set_real_ip_from 10.95.0.0/16;
+    set_real_ip_from 192.168.122.0/24;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api {
+        proxy_pass http://10.95.4.2;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+ENDOFFILE
+
+nginx -t && service nginx restart
+```
+```bash
+# geto: hanya percayai proxy terpercaya (gojo)
+cat > /etc/nginx/sites-available/lb << 'ENDOFFILE'
+upstream api_cluster {
+    server 10.95.4.5 weight=3;
+    server 10.95.4.6 weight=1;
+}
+
+server {
+    listen 80;
+    server_name geto.jujutsu.k63.com;
+
+    # HANYA gojo yang dipercayai sebagai proxy
+    set_real_ip_from 10.95.1.4;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+ENDOFFILE
+
+nginx -t && service nginx restart
+```
+```bash
+# nanami, todo, DAN kirara: simpan IP terverifikasi
+cat > /var/www/api/index.php << 'ENDOFFILE'
+<?php
+header('Content-Type: application/json');
+
+$servername = "10.95.4.9";
+$username = "root";
+$password = "root_password";
+$dbname = "db_shibuya_k63";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+
+if ($conn->connect_error) {
+    die(json_encode(["error" => "Connection failed"]));
+}
+
+// Daftar proxy terpercaya - IP ini TIDAK boleh dianggap client
+$trusted_proxy = array("10.95.4.2", "10.95.1.4");
+
+$client_ip = $_SERVER['REMOTE_ADDR'];
+
+// Ambil IP client asli dari X-Forwarded-For, lewati proxy terpercaya
+if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $xff_list = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+    foreach ($xff_list as $ip) {
+        $ip = trim($ip);
+        if (filter_var($ip, FILTER_VALIDATE_IP) && !in_array($ip, $trusted_proxy)) {
+            $client_ip = $ip;
+            break;
+        }
+    }
+}
+
+$endpoint = $_SERVER['REQUEST_URI'];
+
+$stmt = $conn->prepare("INSERT INTO request_logs (client_ip, endpoint) VALUES (?, ?)");
+$stmt->bind_param("ss", $client_ip, $endpoint);
+$stmt->execute();
+$stmt->close();
+
+$result = $conn->query("SELECT * FROM request_logs ORDER BY id DESC LIMIT 5");
+$logs = [];
+while ($row = $result->fetch_assoc()) {
+    $logs[] = $row;
+}
+
+$conn->close();
+
+echo json_encode([
+    "status" => "success",
+    "hostname" => gethostname(),
+    "client_ip" => $client_ip,
+    "recent_logs" => $logs
+]);
+ENDOFFILE
+
+php -l /var/www/api/index.php
+```
+```bash
+# nanami, todo, DAN kirara: pastikan config nginx API sudah handle /api (soal 16)
+cat > /etc/nginx/sites-available/api << 'ENDOFFILE'
+server {
+    listen 80;
+    server_name api.jujutsu.k63.com;
+    root /var/www/api;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+    }
+
+    allow 10.95.4.2;
+    deny all;
+}
+ENDOFFILE
+
+nginx -t && service nginx restart
+```
+```bash
+# verifikasi dari client Network 2 dan 3
+
+# zenin (Network 2)
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+curl http://jujutsu.k63.com/api
+# HARUS: "client_ip":"10.95.2.4"
+
+# ino (Network 3)
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+curl http://jujutsu.k63.com/api
+# HARUS: "client_ip":"10.95.3.2"
+```
+```bash
+# yaga: cek database
+mysql -h 10.95.4.9 -u root -proot_password db_shibuya_k63 -e "SELECT * FROM request_logs ORDER BY id DESC LIMIT 10;"
+```
+
+## Soal 18
+
+Failover: kirara dijadikan `backup` di upstream geto, aktif hanya saat nanami dan todo mati.
+
+```bash
+# kirara: pastikan API berjalan (prasyarat: kirara sudah dikonfigurasi di soal 14)
+ip addr add 10.95.4.7/24 dev eth0 2>/dev/null
+ip link set eth0 up
+ip route add default via 10.95.4.1 2>/dev/null
+
+# cek status
+ip addr show eth0 | grep inet
+ps aux | grep nginx | head -2
+ps aux | grep php-fpm | head -2
+ls -la /run/php/php8.4-fpm.sock
+ls -la /var/www/api/index.php
+
+# kalau php-fpm mati
+/usr/sbin/php-fpm8.4 -D
+service nginx restart
+
+# cek config kirara sudah allow geto
+grep -n "allow\|deny" /etc/nginx/sites-available/api
+```
+```bash
+# geto: upstream dengan backup dan health check
+cat > /etc/nginx/sites-available/lb << 'ENDOFFILE'
+upstream api_cluster {
+    server 10.95.4.5 weight=3 max_fails=2 fail_timeout=5s;
+    server 10.95.4.6 weight=1 max_fails=2 fail_timeout=5s;
+    server 10.95.4.7 backup;
+}
+
+server {
+    listen 80;
+    server_name geto.jujutsu.k63.com;
+
+    set_real_ip_from 10.95.1.4;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+ENDOFFILE
+
+nginx -t && service nginx restart
+```
+```bash
+# geto: baseline sebelum gangguan
+
+# test kirara langsung (hostname: kirara)
+curl http://10.95.4.7/
+
+# distribusi normal (harus nanami + todo saja)
+for i in $(seq 1 10); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+```
+```bash
+# simulasi gangguan
+
+# nanami
+service nginx stop
+ps aux | grep nginx | grep -v grep
+
+# todo
+service nginx stop
+ps aux | grep nginx | grep -v grep
+```
+```bash
+# geto: buktikan failover ke kirara (tunggu ~5 detik / fail_timeout dulu)
+sleep 5
+curl http://localhost/
+curl http://localhost/api
+
+# loop - semua harus kirara
+for i in $(seq 1 10); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+
+# dari client (zenin)
+curl http://jujutsu.k63.com/api
+for i in $(seq 1 10); do curl -s http://jujutsu.k63.com/api | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+```
+```bash
+# pulihkan layanan
+
+# nanami
+service nginx start
+
+# todo
+service nginx start
+
+# geto: harus kembali ke nanami/todo
+for i in $(seq 1 10); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+```
+
+## Soal 19
+
+Caching halaman frontend dan rate limiting API di gojo.
+
+```bash
+# gojo: direktori cache
+mkdir -p /var/cache/nginx/frontend
+chown -R www-data:www-data /var/cache/nginx
+```
+```bash
+# gojo: konfigurasi
+# catatan: proxy_cache_path dan limit_req_zone HARUS di luar blok server{}
+cat > /etc/nginx/sites-available/gojo << 'ENDOFFILE'
+proxy_cache_path /var/cache/nginx/frontend levels=1:2 keys_zone=frontend_cache:10m max_size=1g inactive=60m;
+
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+upstream frontend_cluster {
+    server 10.95.4.3;
+    server 10.95.4.4;
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k63.com www.jujutsu.k63.com;
+
+    set_real_ip_from 10.95.0.0/16;
+    set_real_ip_from 192.168.122.0/24;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    # Halaman web frontend - DENGAN CACHING
+    location / {
+        proxy_cache frontend_cache;
+        proxy_cache_valid 200 10m;
+        proxy_cache_key "$scheme$request_method$host$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # API - DENGAN RATE LIMITING
+    location /api {
+        limit_req zone=api_limit burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://10.95.4.2;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+ENDOFFILE
+
+nginx -t && service nginx restart
+```
+```bash
+# verifikasi caching (MISS -> HIT)
+
+# gojo: hapus cache dulu
+rm -rf /var/cache/nginx/frontend/*
+
+# client (zenin / ino / kusakabe)
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+
+curl -I http://jujutsu.k63.com/
+curl -I http://jujutsu.k63.com/
+curl -I http://jujutsu.k63.com/
+
+# HARUS:
+# Request 1 -> X-Cache-Status: MISS
+# Request 2 -> X-Cache-Status: HIT
+# Request 3 -> X-Cache-Status: HIT
+```
+```bash
+# verifikasi rate limiting (client zenin)
+for i in $(seq 1 50); do curl -s -o /dev/null -w "%{http_code} " http://jujutsu.k63.com/api; done; echo
+
+# HARUS: muncul beberapa 200 lalu banyak 429
+```
+```bash
+# gojo: utility cek dan clear cache
+
+# cek isi cache
+ls -la /var/cache/nginx/frontend/
+
+# cek ukuran cache
+du -sh /var/cache/nginx/frontend/
+
+# clear cache (untuk test ulang MISS)
+rm -rf /var/cache/nginx/frontend/*
+
+# cek log error rate limit
+tail -20 /var/log/nginx/error.log
+```
+
+## Soal 20
+
+Benchmark dengan Apache Benchmark (`ab`) dari kusakabe ke gojo, lalu analisis access log.
+
+```bash
+# kusakabe (Alpine): persiapan
+
+# set DNS ke utahime
+echo "nameserver 10.95.1.2" > /etc/resolv.conf
+
+# cek IP address
+ip addr show eth0 | grep inet
+# HARUS: inet 10.95.3.3/24
+
+# kalau belum ada IP, set manual
+ip addr add 10.95.3.3/24 dev eth0
+ip link set eth0 up
+ip route add default via 10.95.3.1
+
+# install Apache Benchmark
+apk update
+apk add apache2-utils
+
+# verifikasi
+ab -V
+# Output: This is ApacheBench, Version 2.3
+```
+```bash
+# kusakabe: benchmark baseline - halaman web "/"
+ab -n 600 -c 30 http://jujutsu.k63.com/
+```
+```bash
+# kusakabe: benchmark dengan rate limiting aktif - "/api"
+ab -n 600 -c 30 http://jujutsu.k63.com/api
+```
+```bash
+# kusakabe: benchmark via IP (alternatif / bukti tambahan)
+ab -n 600 -c 30 http://10.95.1.4/
+ab -n 600 -c 30 http://10.95.1.4/api
+```
+```bash
+# gojo: analisis access log
+
+# hitung response code dari benchmark terakhir
+tail -1200 /var/log/nginx/access.log | awk '{print $9}' | sort | uniq -c | sort -rn
+
+# lihat request yang DITOLAK rate limit
+grep " 429 " /var/log/nginx/access.log | tail -10
+
+# cek kegagalan APLIKASI (5xx)
+grep -E " 5[0-9][0-9] " /var/log/nginx/access.log | tail -10
+
+# cek request ke "/" (harus semua 200)
+grep "GET / HTTP" /var/log/nginx/access.log | tail -10 | awk '{print $9}' | sort | uniq -c
+
+# cek kegagalan koneksi di error log
+tail -20 /var/log/nginx/error.log
+```
