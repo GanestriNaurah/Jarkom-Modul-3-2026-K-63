@@ -1,12 +1,5 @@
 # Jarkom-Modul-3-2026-k-63
 
-Prefix IP kelompok: `10.95`
-
-| Node | IP | Peran |
-|---|---|---|
-| jichi | eth0 DHCP (NAT), eth1 `10.95.1.1`, eth2 `10.95.2.1`, eth3 `10.95.3.1`, eth4 `10.95.4.1` | Router utama dan DHCP Relay |
-| tengen | `10.95.4.10` | DHCP Server |
-
 ## Soal 1
 
 Konfigurasi jichi: eth0 dari NAT, eth1-eth4 jadi gateway Network 1-4, IPv4 forwarding dan source NAT.
