@@ -652,22 +652,37 @@ subnet 10.95.3.0 netmask 255.255.255.0 {
 
 ## Soal 11
 
-DNS master-slave untuk zona `jujutsu.k63.com`: utahime (`10.95.1.2`) sebagai master, shoko (`10.95.1.3`) sebagai slave.
+### Konfigurasi dan Implementasi
+
+#### Instalasi BIND9
+
+Instalasi dilakukan pada server Utahime dan Shoko untuk menyediakan layanan DNS beserta utilitas pendukungnya.
+
+**Kode pada Utahime:**
 
 ```bash
-# utahime: install BIND9
 echo "nameserver 192.168.122.1" > /etc/resolv.conf
 apt-get update
 apt-get install -y bind9 bind9utils dnsutils
 ```
+
+**Kode pada Shoko:**
+
 ```bash
-# shoko: install BIND9
 echo "nameserver 192.168.122.1" > /etc/resolv.conf
 apt-get update
 apt-get install -y bind9 bind9utils dnsutils
 ```
+
+Perintah tersebut mengatur DNS resolver, memperbarui daftar paket, dan memasang BIND9, utilitas administrasi DNS, serta `dig` untuk pengujian.
+
+#### Konfigurasi DNS Master pada Utahime
+
+Pada Utahime, dibuat file zona `/etc/bind/db.jujutsu.k63.com` yang berisi informasi domain, SOA record, NS record, dan alamat IP kedua server DNS.
+
+**Kode file zona:**
+
 ```bash
-# utahime (master): zone file
 cat > /etc/bind/db.jujutsu.k63.com << 'EOF'
 $TTL 86400
 @   IN  SOA  ns1.jujutsu.k63.com. admin.jujutsu.k63.com. (
@@ -683,8 +698,15 @@ $TTL 86400
 ns1     IN  A    10.95.1.2
 ns2     IN  A    10.95.1.3
 EOF
+```
 
-# utahime (master): named.conf.local
+SOA record menentukan server DNS utama, alamat administrator, nomor serial, dan interval pembaruan zona. NS record mendefinisikan Utahime dan Shoko sebagai server DNS yang berwenang untuk domain tersebut. A record memetakan nama `ns1` dan `ns2` ke alamat IP masing-masing.
+
+Selanjutnya, konfigurasi zona ditambahkan ke file `/etc/bind/named.conf.local`.
+
+**Kode konfigurasi Master:**
+
+```bash
 cat > /etc/bind/named.conf.local << 'EOF'
 zone "jujutsu.k63.com" {
     type master;
@@ -693,17 +715,35 @@ zone "jujutsu.k63.com" {
     also-notify { 10.95.1.3; };
 };
 EOF
+```
 
-# validasi
+Parameter `type master` menetapkan Utahime sebagai server DNS utama. Parameter `file` menentukan lokasi file zona, sedangkan `allow-transfer` membatasi transfer zona agar hanya dapat dilakukan oleh Shoko dengan alamat IP `10.95.1.3`. Parameter `also-notify` memberi tahu Shoko ketika terdapat perubahan pada zona.
+
+**Validasi konfigurasi:**
+
+```bash
 named-checkconf
 named-checkzone jujutsu.k63.com /etc/bind/db.jujutsu.k63.com
+```
 
-# start bind9
-pkill named 2>/dev/null; sleep 1
+Perintah tersebut digunakan untuk memeriksa sintaks konfigurasi BIND9 dan memastikan file zona memiliki format yang valid.
+
+**Menjalankan layanan DNS:**
+
+```bash
+pkill named 2>/dev/null
 named -g &
 ```
+
+Perintah ini menghentikan proses `named` yang sedang berjalan, menunggu satu detik, kemudian menjalankan BIND9 di latar belakang dengan output log diarahkan ke terminal.
+
+#### Konfigurasi DNS Slave pada Shoko
+
+Shoko dikonfigurasi sebagai DNS Slave agar memperoleh salinan zona dari Utahime melalui mekanisme *zone transfer*.
+
+**Kode konfigurasi Slave:**
+
 ```bash
-# shoko (slave): named.conf.local
 cat > /etc/bind/named.conf.local << 'EOF'
 zone "jujutsu.k63.com" {
     type slave;
@@ -711,28 +751,58 @@ zone "jujutsu.k63.com" {
     masters { 10.95.1.2; };
 };
 EOF
+```
 
-# validasi
+Parameter `type slave` menetapkan Shoko sebagai DNS sekunder, sedangkan `masters` menentukan Utahime dengan alamat IP `10.95.1.2` sebagai sumber zona. File zona pada Shoko diperoleh melalui transfer dari Master dan disimpan oleh BIND9 sebagai salinan zona sekunder.
+
+**Validasi dan menjalankan layanan:**
+
+```bash
 named-checkconf
-
-# start bind9
-pkill named 2>/dev/null; sleep 1
+pkill named 2>/dev/null
 named -g &
 ```
+
+Validasi dilakukan untuk memeriksa sintaks konfigurasi. Setelah itu, layanan BIND9 dijalankan agar Shoko dapat meminta dan menerima zona dari Utahime.
+
+#### Pengujian DNS dari Client
+
+Pengujian dilakukan menggunakan perintah `dig` untuk memastikan bahwa kedua server dapat memberikan jawaban atas permintaan DNS untuk domain `jujutsu.k63.com`.
+
+**Pengujian terhadap Utahime:**
+
 ```bash
-# verifikasi dari client
 dig @10.95.1.2 jujutsu.k63.com
+```
+
+**Pengujian terhadap Shoko:**
+
+```bash
 dig @10.95.1.3 jujutsu.k63.com
 ```
+
+Kedua perintah mengirimkan permintaan DNS secara langsung ke alamat IP server yang dituju. Hasil pengujian digunakan untuk memeriksa apakah domain dapat diresolusikan oleh DNS Master dan DNS Slave.
+
+#### Pengujian Sinkronisasi Nomor Serial
+
+Sinkronisasi diuji dengan menaikkan nomor serial pada file zona di Utahime. Nomor serial digunakan BIND9 untuk mengetahui apakah data zona Master lebih baru daripada salinan zona Slave.
+
+**Kode pada Utahime:**
+
 ```bash
-# bukti sinkronisasi serial
-# utahime (master): naikkan serial
 sed -i 's/2024101501/2024101502/' /etc/bind/db.jujutsu.k63.com
 pkill named && sleep 1 && named -g &
+```
 
-# shoko (slave): cek serial berubah
+Perintah `sed` mengubah nomor serial dari `2024101501` menjadi `2024101502`. Setelah itu, proses BIND9 dimulai kembali agar perubahan zona dimuat. Shoko dapat mengetahui perubahan melalui mekanisme pemberitahuan DNS dan pemeriksaan serial zona secara berkala.
+
+**Kode pemeriksaan serial pada Shoko:**
+
+```bash
 dig @10.95.1.3 jujutsu.k63.com SOA
 ```
+
+Perintah tersebut meminta SOA record dari Shoko. Apabila sinkronisasi berhasil, nomor serial yang ditampilkan akan berubah menjadi `2024101502`, sesuai dengan serial terbaru pada Utahime.
 
 ## Soal 12
 
