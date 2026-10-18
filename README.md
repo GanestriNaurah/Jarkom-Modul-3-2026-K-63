@@ -1225,34 +1225,60 @@ Perintah tersebut menghubungkan client ke MariaDB pada Yaga menggunakan alamat I
 
 ## Soal 14
 
-Web server worker: frontend (maki, panda) dan API (nanami, todo, kirara) dengan Nginx + PHP-FPM. Frontend hanya boleh diakses dari gojo, API hanya dari geto.
+### Konfigurasi dan Implementasi
+
+#### Perbaikan Alamat IP Gojo
+
+Gojo dikonfigurasikan menggunakan alamat IP `10.95.1.4` sebagai jalur proxy web menuju frontend worker.
+
+**Kode pada Gojo:**
 
 ```bash
-# gojo: fix IP (sebelumnya bentrok dengan shoko 10.95.1.3)
 ip addr del 10.95.1.3/24 dev eth0
 ip addr add 10.95.1.4/24 dev eth0
 ip route add default via 10.95.1.1
+
 cat > /etc/network/interfaces << 'ENDOFFILE'
- auto eth0
- iface eth0 inet static
-     address 10.95.1.4
-     netmask 255.255.255.0
-     gateway 10.95.1.1
-     dns-nameservers 192.168.122.1
+auto eth0
+iface eth0 inet static
+    address 10.95.1.4
+    netmask 255.255.255.0
+    gateway 10.95.1.1
+    dns-nameservers 192.168.122.1
 ENDOFFILE
-ip addr show eth0 | grep inet    # harus 10.95.1.4/24
+
+ip addr show eth0 | grep inet
 ```
+
+Perintah tersebut mengubah alamat IP Gojo menjadi `10.95.1.4/24`, menetapkan gateway, dan menyimpan konfigurasi jaringan statis agar alamat tetap digunakan setelah konfigurasi jaringan diterapkan.
+
+#### Instalasi Nginx dan PHP-FPM
+
+Instalasi dilakukan pada Maki, Panda, Nanami, Todo, dan Kirara. Nginx bertugas menerima permintaan HTTP, sedangkan PHP-FPM menjalankan kode PHP. Paket `php-mysql` digunakan agar aplikasi PHP dapat terhubung ke MariaDB.
+
+**Kode instalasi pada seluruh worker:**
+
 ```bash
-# semua worker (maki, panda, nanami, todo, kirara): install Nginx + PHP-FPM
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
 apt-get update
 apt-get install -y nginx php-fpm php-mysql
+```
 
-# start php-fpm (binary di trixie = php-fpm8.4)
+**Menjalankan PHP-FPM:**
+
+```bash
 /usr/sbin/php-fpm8.4 -D
 ```
+
+Perintah tersebut menjalankan proses PHP-FPM versi 8.4 di latar belakang sesuai lingkungan praktikum.
+
+#### Konfigurasi API Worker pada Nanami, Todo, dan Kirara
+
+API worker bertugas menerima permintaan HTTP, mencatat alamat IP client dan endpoint yang diakses ke database Yaga, serta mengembalikan respons dalam format JSON.
+
+**Membuat file API:**
+
 ```bash
-# API worker (nanami, todo, kirara): direktori dan file API
 mkdir -p /var/www/api
 cat > /var/www/api/index.php << 'ENDOFFILE'
 <?php
@@ -1292,16 +1318,30 @@ echo json_encode([
     "recent_logs" => $logs
 ]);
 ENDOFFILE
+```
 
-# validasi syntax
+Aplikasi menggunakan koneksi MariaDB ke Yaga dengan alamat IP `10.95.4.9`. Setiap request yang berhasil diproses akan dicatat ke tabel `request_logs`, kemudian API mengembalikan status, hostname worker, alamat IP sumber, dan lima log terbaru dalam format JSON.
+
+**Validasi sintaks PHP:**
+
+```bash
 php -l /var/www/api/index.php
 ```
+
+Perintah tersebut memeriksa sintaks file PHP sebelum aplikasi dijalankan.
+
+#### Konfigurasi Virtual Host API
+
+Virtual host API dibuat agar worker merespons domain `api.jujutsu.k63.com`. Akses dibatasi hanya untuk alamat IP Geto, yaitu `10.95.4.2`.
+
+**Kode konfigurasi pada Nanami, Todo, dan Kirara:**
+
 ```bash
-# API worker (nanami, todo, kirara): virtual host API (HANYA dari geto 10.95.4.2)
 cat > /etc/nginx/sites-available/api << 'ENDOFFILE'
 server {
     listen 80;
     server_name api.jujutsu.k63.com;
+
     root /var/www/api;
     index index.php;
 
@@ -1321,26 +1361,49 @@ ENDOFFILE
 
 ln -sf /etc/nginx/sites-available/api /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
+
 nginx -t
 service nginx restart
 ```
+
+Parameter `server_name` menentukan domain layanan API. Direktif `fastcgi_pass` meneruskan pemrosesan file PHP ke PHP-FPM. Direktif `allow` dan `deny` membatasi akses HTTP berdasarkan alamat IP sumber sehingga permintaan dari alamat selain Geto ditolak.
+
+#### Konfigurasi Frontend Worker pada Maki dan Panda
+
+Maki dan Panda menyediakan halaman frontend sederhana yang menampilkan hostname masing-masing worker.
+
+**Membuat file frontend:**
+
 ```bash
-# frontend worker (maki, panda): direktori dan file PHP
 mkdir -p /var/www/frontend
+
 cat > /var/www/frontend/index.php << 'ENDOFFILE'
 <?php
 echo "<h1>Frontend Worker</h1>";
 echo "<p>Hostname: " . gethostname() . "</p>";
 ENDOFFILE
+```
 
+**Validasi sintaks PHP:**
+
+```bash
 php -l /var/www/frontend/index.php
 ```
+
+File tersebut menggunakan fungsi `gethostname()` untuk menampilkan identitas hostname dari mesin yang menjalankan aplikasi.
+
+#### Konfigurasi Virtual Host Frontend
+
+Virtual host frontend menggunakan domain `jujutsu.k63.com` dan `www.jujutsu.k63.com`. Akses dibatasi hanya untuk Gojo dengan alamat IP `10.95.1.4`.
+
+**Kode konfigurasi pada Maki dan Panda:**
+
 ```bash
-# frontend worker (maki, panda): virtual host frontend (HANYA dari gojo 10.95.1.4)
 cat > /etc/nginx/sites-available/frontend << 'ENDOFFILE'
 server {
     listen 80;
     server_name jujutsu.k63.com www.jujutsu.k63.com;
+
     root /var/www/frontend;
     index index.php;
 
@@ -1360,29 +1423,67 @@ ENDOFFILE
 
 ln -sf /etc/nginx/sites-available/frontend /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
+
 nginx -t
 service nginx restart
 ```
+
+Direktif `server_name` menentukan domain yang dilayani oleh frontend worker. Pembatasan akses menggunakan `allow 10.95.1.4` dan `deny all` memastikan bahwa hanya permintaan dari Gojo yang diizinkan oleh aturan Nginx tersebut.
+
+### Pengujian 
+
+#### Pengujian Akses Langsung ke Worker
+
+Pengujian dilakukan dari client yang tidak termasuk alamat IP yang diizinkan.
+
+**Perintah pengujian:**
+
 ```bash
-# verifikasi
-
-# akses langsung dari worker (HARUS 403)
 curl http://localhost/
-curl http://10.95.4.3/     # dari maki
-curl http://10.95.4.5/     # dari nanami
+curl -i http://10.95.4.3/
+curl -i http://10.95.4.5/
+```
 
-# geto ke API worker (HARUS BERHASIL)
+Status `403 Forbidden` menunjukkan bahwa permintaan ditolak oleh aturan pembatasan akses Nginx. Hasil aktual bergantung pada alamat IP sumber yang digunakan saat pengujian.
+
+#### Pengujian Akses API melalui Geto
+
+Pengujian dilakukan dari Geto dengan alamat IP `10.95.4.2` untuk memastikan bahwa jalur akses API diizinkan.
+
+**Perintah pada Geto:**
+
+```bash
 curl http://10.95.4.5/     # nanami
 curl http://10.95.4.6/     # todo
 curl http://10.95.4.7/     # kirara
+```
 
-# gojo ke frontend (HARUS BERHASIL, pastikan IP gojo = 10.95.1.4)
+Respons menunjukkan API worker berhasil memproses permintaan, mencatat aktivitas ke database, dan mengembalikan data dalam format JSON. Nilai aktual hostname, ID, waktu, dan isi log bergantung pada hasil eksekusi.
+
+#### Pengujian Akses Frontend melalui Gojo
+
+Pengujian dilakukan dari Gojo untuk memastikan bahwa akses ke Maki dan Panda diizinkan.
+
+**Perintah pada Gojo:**
+
+```bash
 curl http://10.95.4.3/     # maki
 curl http://10.95.4.4/     # panda
-
-# geto ke frontend worker (HARUS 403 - tidak diizinkan)
-curl http://10.95.4.3/     # harus 403
 ```
+
+Hasil menunjukkan frontend worker dapat diakses melalui jalur yang diizinkan dan menampilkan hostname masing-masing mesin.
+
+#### Pengujian Akses Frontend dari Geto
+
+Pengujian ini dilakukan untuk memastikan bahwa Geto tidak memperoleh akses langsung ke frontend worker.
+
+**Perintah pada Geto:**
+
+```bash
+curl -i http://10.95.4.3/
+```
+
+Status `403 Forbidden` menunjukkan bahwa permintaan ditolak karena alamat IP Geto tidak termasuk alamat yang diizinkan untuk mengakses frontend worker.
 
 ## Soal 15
 
