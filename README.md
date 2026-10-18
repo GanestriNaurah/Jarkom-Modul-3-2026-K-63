@@ -726,12 +726,12 @@ named-checkconf
 named-checkzone jujutsu.k63.com /etc/bind/db.jujutsu.k63.com
 ```
 
-Perintah tersebut digunakan untuk memeriksa sintaks konfigurasi BIND9 dan memastikan file zona memiliki format yang valid.
+Perintah tersebut digunakan untuk memeriksa sintaks konfigurasi BIND9 dan memastikan file zona memiliki format yang valid. Jika konfigurasi benar, named-checkconf tidak menampilkan pesan kesalahan, sedangkan named-checkzone menampilkan status OK.
 
 **Menjalankan layanan DNS:**
 
 ```bash
-pkill named 2>/dev/null
+pkill named 2>/dev/null; sleep 1
 named -g &
 ```
 
@@ -759,7 +759,7 @@ Parameter `type slave` menetapkan Shoko sebagai DNS sekunder, sedangkan `masters
 
 ```bash
 named-checkconf
-pkill named 2>/dev/null
+pkill named 2>/dev/null; sleep 1
 named -g &
 ```
 
