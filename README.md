@@ -806,10 +806,15 @@ Perintah tersebut meminta SOA record dari Shoko. Apabila sinkronisasi berhasil, 
 
 ## Soal 12
 
-A record domain utama ke gojo (`10.95.1.4`), CNAME `www`, reverse DNS (PTR), dan DNS forwarder. Semua perintah di utahime kecuali verifikasi.
+### Konfigurasi dan Implementasi
+
+#### Update Zone File Forward
+
+File zona forward dibuat untuk menentukan pemetaan domain ke alamat IP, alias domain, dan informasi server DNS.
+
+**Kode pada Utahime:**
 
 ```bash
-# utahime: update zone file forward
 cat > /etc/bind/db.jujutsu.k63.com << 'EOF'
 $TTL 86400
 @   IN  SOA  ns1.jujutsu.k63.com. admin.jujutsu.k63.com. (
@@ -822,7 +827,7 @@ $TTL 86400
 @       IN  NS   ns1.jujutsu.k63.com.
 @       IN  NS   ns2.jujutsu.k63.com.
 
-; A Record - Domain utama ke gojo
+; A Record - Domain utama ke Gojo
 @       IN  A    10.95.1.4
 
 ; CNAME - www merujuk ke domain utama
@@ -833,8 +838,16 @@ ns1     IN  A    10.95.1.2
 ns2     IN  A    10.95.1.3
 EOF
 ```
+
+Record A pada simbol `@` mengarahkan domain utama `jujutsu.k63.com` ke alamat IP Gojo, yaitu `10.95.1.4`. Record CNAME membuat `www.jujutsu.k63.com` menjadi alias dari domain utama. Sementara itu, record NS menentukan server DNS yang berwenang mengelola zona tersebut.
+
+#### Konfigurasi Reverse DNS (PTR)
+
+Reverse DNS digunakan untuk mencari nama domain berdasarkan alamat IP. Pada praktikum ini, alamat IP `10.95.1.4` dipetakan kembali ke domain `jujutsu.k63.com`.
+
+**Kode pembuatan file zona Reverse DNS:**
+
 ```bash
-# utahime: reverse DNS zone (PTR)
 cat > /etc/bind/db.10.95.1 << 'EOF'
 $TTL 86400
 @   IN  SOA  ns1.jujutsu.k63.com. admin.jujutsu.k63.com. (
@@ -847,12 +860,20 @@ $TTL 86400
 @       IN  NS   ns1.jujutsu.k63.com.
 @       IN  NS   ns2.jujutsu.k63.com.
 
-; PTR Record - 10.95.1.4 → jujutsu.k63.com
+; PTR Record - 10.95.1.4 ke domain utama
 4       IN  PTR  jujutsu.k63.com.
 EOF
 ```
+
+Record PTR dengan angka `4` menunjukkan alamat host `10.95.1.4` pada zona reverse `1.95.10.in-addr.arpa`. Dengan demikian, alamat IP Gojo dapat dicari menggunakan permintaan Reverse DNS.
+
+#### Update Konfigurasi Zona pada BIND9
+
+File `/etc/bind/named.conf.local` digunakan untuk mendaftarkan zona forward dan reverse agar dapat dikelola oleh BIND9.
+
+**Kode konfigurasi:**
+
 ```bash
-# utahime: update named.conf.local
 cat > /etc/bind/named.conf.local << 'EOF'
 zone "jujutsu.k63.com" {
     type master;
@@ -869,41 +890,107 @@ zone "1.95.10.in-addr.arpa" {
 };
 EOF
 ```
+
+Zona forward mengelola pemetaan nama domain ke alamat IP, sedangkan zona reverse mengelola pemetaan alamat IP ke nama domain. Parameter `allow-transfer` mengizinkan Shoko dengan IP `10.95.1.3` menerima transfer zona. Parameter `also-notify` memberi tahu Shoko ketika terdapat perubahan zona.
+
+#### Konfigurasi DNS Forwarder
+
+DNS Forwarder digunakan untuk meneruskan permintaan DNS yang tidak dapat dijawab dari zona lokal ke server DNS lain. Pada konfigurasi ini, permintaan diteruskan ke gateway internet `192.168.122.1`.
+
+**Kode pada Utahime:**
+
 ```bash
-# utahime: aktifkan DNS forwarder
 cat > /etc/bind/named.conf.options << 'EOF'
 options {
     directory "/var/cache/bind";
+
     forwarders {
         192.168.122.1;
     };
+
     recursion yes;
     allow-query { any; };
 };
 EOF
 ```
+
+Parameter `forwarders` menentukan server DNS tujuan penerusan permintaan. Parameter `recursion yes` mengaktifkan resolusi rekursif, sedangkan `allow-query { any; }` mengizinkan permintaan DNS dari seluruh alamat IP. Dalam penerapan nyata, akses ini sebaiknya dibatasi ke jaringan praktikum untuk menghindari penyalahgunaan server DNS.
+
+#### Validasi dan Restart BIND9
+
+Sebelum layanan dijalankan kembali, konfigurasi dan kedua file zona diperiksa untuk memastikan tidak terdapat kesalahan sintaks.
+
+**Kode validasi:**
+
 ```bash
-# utahime: validasi dan restart
 named-checkconf
 named-checkzone jujutsu.k63.com /etc/bind/db.jujutsu.k63.com
 named-checkzone 1.95.10.in-addr.arpa /etc/bind/db.10.95.1
-pkill named && sleep 1 && named -g &
 ```
+
+**Kode menjalankan ulang layanan:**
+
 ```bash
-# verifikasi dari client
-
-# cek A record (domain -> IP gojo)
-dig @10.95.1.2 jujutsu.k63.com
-
-# cek CNAME (www -> domain utama)
-dig @10.95.1.2 www.jujutsu.k63.com
-
-# cek PTR (IP gojo -> domain)
-dig @10.95.1.2 -x 10.95.1.4
-
-# cek forwarder - ping domain internet
-ping google.com
+pkill named
+sleep 1
+named -g &
 ```
+
+Perintah validasi memeriksa konfigurasi BIND9 dan integritas file zona. Setelah pemeriksaan selesai, proses `named` dijalankan kembali agar perubahan konfigurasi diterapkan.
+
+### Pengujian dan Hasil Output
+
+Output berikut merupakan contoh hasil yang diharapkan, bukan hasil eksekusi aktual.
+
+#### Pengujian A Record
+
+**Perintah:**
+
+```bash
+dig @10.95.1.2 jujutsu.k63.com
+```
+
+Status `NOERROR` menunjukkan bahwa permintaan berhasil dijawab. Record A menunjukkan bahwa domain `jujutsu.k63.com` diarahkan ke alamat IP Gojo, yaitu `10.95.1.4`.
+
+#### Pengujian CNAME
+
+**Perintah:**
+
+```bash
+dig @10.95.1.2 www.jujutsu.k63.com
+```
+
+Output menunjukkan bahwa `www.jujutsu.k63.com` merupakan alias dari `jujutsu.k63.com`. Server juga dapat menampilkan record A tujuan sehingga client memperoleh alamat IP `10.95.1.4`.
+
+#### Pengujian Reverse DNS (PTR)
+
+**Perintah:**
+
+```bash
+dig @10.95.1.2 -x 10.95.1.4
+```
+
+Hasil menunjukkan bahwa alamat IP `10.95.1.4` berhasil dipetakan kembali ke domain `jujutsu.k63.com` melalui record PTR.
+
+#### Pengujian DNS Forwarder
+
+**Perintah:**
+
+```bash
+dig @10.95.1.2 google.com
+```
+
+Status `NOERROR` dan adanya jawaban A menunjukkan bahwa resolusi domain eksternal berhasil melalui server DNS yang digunakan.
+
+#### Pengujian Koneksi Internet dengan Ping
+
+**Perintah:**
+
+```bash
+ping -c 4 google.com
+```
+
+Hasil menunjukkan client berhasil menerjemahkan nama domain `google.com` menjadi alamat IP dan menerima balasan ICMP. Namun, ping dapat gagal meskipun DNS berfungsi apabila koneksi jaringan bermasalah atau paket ICMP diblokir oleh tujuan maupun jaringan perantara.
 
 ## Soal 13
 
