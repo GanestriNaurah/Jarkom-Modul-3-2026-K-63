@@ -994,24 +994,40 @@ Hasil menunjukkan client berhasil menerjemahkan nama domain `google.com` menjadi
 
 ## Soal 13
 
-Replikasi MariaDB: yaga (`10.95.4.9`) sebagai master, inumaki (`10.95.4.8`) sebagai slave, database `db_shibuya_k63`.
+### Konfigurasi dan Implementasi
+
+#### Instalasi MariaDB
+
+MariaDB dipasang pada Yaga dan Inumaki sebagai layanan database yang mendukung replikasi.
+
+**Kode pada Yaga dan Inumaki:**
 
 ```bash
-# yaga DAN inumaki: install MariaDB
 echo "nameserver 192.168.122.1" > /etc/resolv.conf
 apt-get update
 apt-get install -y mariadb-server mariadb-client
 ```
-```bash
-# yaga (master) - 10.95.4.9
 
-# buat direktori log dan file index
+Perintah tersebut mengatur DNS resolver, memperbarui daftar paket, dan memasang server serta client MariaDB.
+
+#### Konfigurasi DB Master pada Yaga
+
+Yaga menggunakan alamat IP `10.95.4.9` dan bertugas menyimpan data utama serta mencatat perubahan database melalui binary log.
+
+**Membuat direktori log:**
+
+```bash
 mkdir -p /var/log/mysql
 touch /var/log/mysql/mysql-bin.index
 chown mysql:mysql /var/log/mysql
 chown mysql:mysql /var/log/mysql/mysql-bin.index
+```
 
-# edit konfigurasi MariaDB
+Direktori tersebut digunakan untuk menyimpan file binary log yang mencatat perubahan data agar dapat dikirim dan diterapkan oleh Slave.
+
+**Konfigurasi MariaDB Master:**
+
+```bash
 cat > /etc/mysql/mariadb.conf.d/50-server.cnf << 'EOF'
 [mysqld]
 server-id = 1
@@ -1019,70 +1035,126 @@ log-bin = /var/log/mysql/mysql-bin.log
 binlog_do_db = db_shibuya_k63
 bind-address = 0.0.0.0
 EOF
+```
 
-# restart MariaDB
+Parameter `server-id = 1` memberikan identitas unik kepada Master. Parameter `log-bin` mengaktifkan binary logging, sedangkan `binlog_do_db` membatasi database yang dicatat untuk replikasi. `bind-address = 0.0.0.0` memungkinkan MariaDB menerima koneksi melalui alamat jaringan yang tersedia, dengan tetap memerlukan pengaturan hak akses dan firewall yang sesuai.
+
+**Menjalankan ulang MariaDB:**
+
+```bash
 service mariadb restart
+```
 
-# buat database dan tabel
+**Membuat database dan tabel:**
+
+```bash
 mysql -u root << 'EOF'
 CREATE DATABASE IF NOT EXISTS db_shibuya_k63;
 USE db_shibuya_k63;
+
 CREATE TABLE IF NOT EXISTS request_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     client_ip VARCHAR(45),
     endpoint VARCHAR(255),
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 FLUSH PRIVILEGES;
 EOF
+```
 
-# buat user replication
+Database `db_shibuya_k63` berfungsi sebagai penyimpanan log aktivitas. Tabel `request_logs` memiliki kolom `id` sebagai primary key otomatis, `client_ip` untuk menyimpan alamat IP client, `endpoint` untuk mencatat endpoint yang diakses, dan `timestamp` untuk mencatat waktu pembuatan data.
+
+**Membuat user replikasi:**
+
+```bash
 mysql -u root << 'EOF'
-CREATE USER IF NOT EXISTS 'repl'@'10.95.4.%' IDENTIFIED BY 'repl_password';
-GRANT REPLICATION SLAVE ON *.* TO 'repl'@'10.95.4.%';
+CREATE USER IF NOT EXISTS 'repl'@'10.95.4.%'
+IDENTIFIED BY 'repl_password';
+
+GRANT REPLICATION SLAVE ON *.*
+TO 'repl'@'10.95.4.%';
+
 FLUSH PRIVILEGES;
 EOF
+```
 
-# grant remote access untuk Network 4
+User `repl` diberikan hak replikasi untuk koneksi dari alamat IP yang sesuai dengan pola `10.95.4.%`. Akun ini digunakan oleh Inumaki untuk mengambil perubahan data dari Master.
+
+**Memberikan akses remote untuk Network 4:**
+
+```bash
 mysql -u root << 'EOF'
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'10.95.4.%' IDENTIFIED BY 'root_password';
+GRANT ALL PRIVILEGES ON *.*
+TO 'root'@'10.95.4.%'
+IDENTIFIED BY 'root_password';
+
 FLUSH PRIVILEGES;
 EOF
+```
 
-# cek status master
+Perintah tersebut memberikan hak akses database kepada akun remote `root` dari jaringan `10.95.4.0/24` sesuai pola host yang digunakan. Untuk penerapan yang lebih aman, sebaiknya dibuat akun khusus dengan hak akses minimum yang diperlukan daripada memberikan seluruh hak istimewa kepada akun `root`.
+
+**Memeriksa status Master:**
+
+```bash
 mysql -u root -e "SHOW MASTER STATUS;"
 ```
-```bash
-# inumaki (slave) - 10.95.4.8
 
-# buat direktori log
+Perintah `SHOW MASTER STATUS` digunakan untuk melihat nama file binary log dan posisi pencatatan terakhir yang menjadi acuan konfigurasi replikasi Slave.
+
+#### Konfigurasi DB Slave pada Inumaki
+
+Inumaki menggunakan alamat IP `10.95.4.8` dan bertugas menerima serta menerapkan perubahan data dari Yaga.
+
+**Membuat direktori log:**
+
+```bash
 mkdir -p /var/log/mysql
 chown mysql:mysql /var/log/mysql
+```
 
-# edit konfigurasi MariaDB
+**Konfigurasi MariaDB Slave:**
+
+```bash
 cat > /etc/mysql/mariadb.conf.d/50-server.cnf << 'EOF'
 [mysqld]
 server-id = 2
 bind-address = 0.0.0.0
 EOF
+```
 
-# restart MariaDB
+Parameter `server-id = 2` memberikan identitas unik kepada Slave agar tidak sama dengan Master. Parameter `bind-address` memungkinkan koneksi jaringan ke layanan MariaDB sesuai dengan konfigurasi firewall dan hak akses.
+
+**Menjalankan ulang MariaDB:**
+
+```bash
 service mariadb restart
+```
 
-# buat database dan tabel (untuk menghindari error replikasi)
+**Membuat database dan tabel:**
+
+```bash
 mysql -u root << 'EOF'
 CREATE DATABASE IF NOT EXISTS db_shibuya_k63;
 USE db_shibuya_k63;
+
 CREATE TABLE IF NOT EXISTS request_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     client_ip VARCHAR(45),
     endpoint VARCHAR(255),
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 FLUSH PRIVILEGES;
 EOF
+```
 
-# hubungkan slave ke master
+Database dan tabel disiapkan agar struktur data tersedia pada Slave. Dalam penerapan replikasi, struktur dan isi awal database harus konsisten dengan Master agar tidak terjadi konflik ketika perubahan mulai diterapkan.
+
+**Menghubungkan Slave ke Master:**
+
+```bash
 mysql -u root << 'EOF'
 CHANGE MASTER TO
     MASTER_HOST='10.95.4.9',
@@ -1090,30 +1162,66 @@ CHANGE MASTER TO
     MASTER_PASSWORD='repl_password',
     MASTER_LOG_FILE='mysql-bin.000001',
     MASTER_LOG_POS=940;
+
 START SLAVE;
 EOF
+```
 
-# cek status slave
+Perintah `CHANGE MASTER TO` menetapkan alamat server Master, akun replikasi, nama file binary log, dan posisi log awal. Nilai `MASTER_LOG_FILE` dan `MASTER_LOG_POS` harus disesuaikan dengan hasil `SHOW MASTER STATUS` dari Yaga, bukan diasumsikan selalu sama.
+
+Perintah `START SLAVE` memulai proses replikasi sehingga Inumaki dapat mengambil perubahan dari binary log Master dan menerapkannya ke database lokal.
+
+**Memeriksa status Slave:**
+
+```bash
 mysql -u root -e "SHOW SLAVE STATUS\G"
 ```
+
+Status Slave digunakan untuk memeriksa koneksi ke Master, proses pembacaan binary log, dan proses penerapan perubahan pada database.
+
+#### Verifikasi Replikasi Data
+
+Pengujian dilakukan dengan memasukkan data baru ke tabel `request_logs` pada Yaga, kemudian memeriksa apakah data tersebut muncul pada Inumaki.
+
+**Memasukkan data pada Master (Yaga):**
+
 ```bash
-# verifikasi replikasi
-
-# yaga (master): masukkan data
-mysql -u root db_shibuya_k63 -e "INSERT INTO request_logs (client_ip, endpoint) VALUES ('10.95.2.10', '/api/test-replication');"
-
-# inumaki (slave): cek data
-mysql -u root db_shibuya_k63 -e "SELECT * FROM request_logs;"
+mysql -u root db_shibuya_k63 -e \
+"INSERT INTO request_logs (client_ip, endpoint)
+VALUES ('10.95.2.10', '/api/test-replication');"
 ```
+
+Perintah tersebut menambahkan satu catatan aktivitas dengan alamat IP client `10.95.2.10` dan endpoint `/api/test-replication`.
+
+**Memeriksa data pada Slave (Inumaki):**
+
 ```bash
-# verifikasi remote access dari node lain di Network 4 (misal tengen, geto, worker)
+mysql -u root db_shibuya_k63 -e \
+"SELECT * FROM request_logs;"
+```
+
+Jika replikasi berjalan dengan baik, data yang dimasukkan pada Yaga akan muncul pada hasil query di Inumaki tanpa perlu melakukan INSERT ulang secara manual.
+
+#### Verifikasi Akses Remote dari Network 4
+
+Pengujian dilakukan dari node lain di Network 4, misalnya Tengen, Geto, atau worker, untuk memastikan koneksi remote ke database Master berfungsi.
+
+**Instalasi client pada node penguji:**
+
+```bash
 echo "nameserver 192.168.122.1" > /etc/resolv.conf
 apt-get update
 apt-get install -y mariadb-client
-
-# query dari node lain
-mysql -h 10.95.4.9 -u root -proot_password -e "SELECT * FROM db_shibuya_k63.request_logs;"
 ```
+
+**Melakukan query ke Master:**
+
+```bash
+mysql -h 10.95.4.9 -u root -proot_password \
+-e "SELECT * FROM db_shibuya_k63.request_logs;"
+```
+
+Perintah tersebut menghubungkan client ke MariaDB pada Yaga menggunakan alamat IP `10.95.4.9` dan menampilkan data dari tabel `request_logs`. Keberhasilan koneksi menunjukkan bahwa akses remote dan jalur jaringan berfungsi sesuai konfigurasi.
 
 ## Soal 14
 
