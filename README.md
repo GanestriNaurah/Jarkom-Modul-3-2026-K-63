@@ -1625,18 +1625,25 @@ Pengujian ini memastikan bahwa Geto dapat diakses melalui alamat IPnya dari node
 
 ## Soal 16
 
-Reverse proxy di gojo dengan path-based routing: `/` ke frontend (maki, panda) secara round robin, `/api` ke geto.
+### Konfigurasi dan Implementasi
+
+#### Perbaikan Alamat IP Gojo
+
+Gojo menggunakan alamat IP `10.95.1.4/24` agar tidak berbenturan dengan Shoko yang menggunakan alamat `10.95.1.3`.
+
+**Kode konfigurasi pada Gojo:**
 
 ```bash
-# gojo: fix IP (bentrok dengan shoko 10.95.1.3)
 ip addr del 10.95.1.3/24 dev eth0
 ip addr add 10.95.1.4/24 dev eth0
 ip route add default via 10.95.1.1
 
-# verifikasi
-ip addr show eth0 | grep inet    # HARUS 10.95.1.4/24
+ip addr show eth0 | grep inet
+```
 
-# konfigurasi permanen
+Konfigurasi permanen jaringan dituliskan pada file `/etc/network/interfaces`.
+
+```bash
 cat > /etc/network/interfaces << 'ENDOFFILE'
 auto eth0
 iface eth0 inet static
@@ -1646,19 +1653,32 @@ iface eth0 inet static
     dns-nameservers 192.168.122.1
 ENDOFFILE
 ```
+
+Perintah verifikasi digunakan untuk memastikan bahwa Gojo telah menggunakan alamat IP yang benar.
+
+#### Instalasi Nginx pada Gojo
+
+Nginx digunakan sebagai reverse proxy publik yang menerima request dari client dan meneruskannya ke backend sesuai path URL.
+
+**Kode instalasi:**
+
 ```bash
-# gojo: install Nginx
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
 apt-get update
 apt-get install -y nginx
 ```
-```bash
-# nanami, todo, DAN kirara: fix API worker supaya path /api tidak 404
-# (prasyarat: tanpa ini, request /api menghasilkan 404)
-cat > /etc/nginx/sites-available/api << 'ENDOFFILE'
+
+#### Penyesuaian Virtual Host API Worker
+
+Penyesuaian dilakukan pada Nanami, Todo, dan Kirara agar request dengan path yang tidak cocok dengan file fisik tetap diarahkan ke `index.php`. Hal ini diperlukan supaya request seperti `/api` dapat diproses oleh aplikasi PHP.
+
+**Kode konfigurasi pada setiap API worker:**
+
+```nginx
 server {
     listen 80;
     server_name api.jujutsu.k63.com;
+
     root /var/www/api;
     index index.php;
 
@@ -1674,13 +1694,23 @@ server {
     allow 10.95.4.2;
     deny all;
 }
-ENDOFFILE
+```
 
+Simpan konfigurasi tersebut pada `/etc/nginx/sites-available/api`, kemudian jalankan:
+
+```bash
 nginx -t && service nginx restart
 ```
-```bash
-# gojo: path-based routing
-cat > /etc/nginx/sites-available/gojo << 'ENDOFFILE'
+
+Direktif `try_files` memastikan request yang tidak menunjuk ke file atau direktori fisik diarahkan ke `index.php` beserta query string. Aturan `allow` dan `deny` membatasi akses API worker agar hanya menerima request dari Geto dengan alamat IP `10.95.4.2`.
+
+#### Konfigurasi Path-Based Routing pada Gojo
+
+Konfigurasi ini merupakan bagian utama praktikum. Gojo menggunakan dua jalur routing, yaitu frontend cluster untuk path root dan Geto untuk path `/api`.
+
+**Kode konfigurasi pada `/etc/nginx/sites-available/gojo`:**
+
+```nginx
 upstream frontend_cluster {
     server 10.95.4.3;
     server 10.95.4.4;
@@ -1690,49 +1720,113 @@ server {
     listen 80;
     server_name jujutsu.k63.com www.jujutsu.k63.com;
 
-    location / {
-        proxy_pass http://frontend_cluster;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
     location /api {
         proxy_pass http://10.95.4.2;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
-}
-ENDOFFILE
 
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+Penjelasan konfigurasi:
+
+- `upstream frontend_cluster` mengelompokkan Maki (`10.95.4.3`) dan Panda (`10.95.4.4`).
+- `location /api` meneruskan request API ke Geto (`10.95.4.2`), yang selanjutnya mendistribusikan request ke Nanami dan Todo.
+- `location /` meneruskan request selain path `/api` ke frontend cluster.
+- `proxy_set_header` meneruskan informasi host dan alamat IP client ke backend.
+
+Nginx memilih lokasi `/api` karena memiliki prefix yang lebih spesifik dibandingkan lokasi `/`. Dengan demikian, request API tidak ikut diarahkan ke frontend worker.
+
+**Mengaktifkan konfigurasi:**
+
+```bash
 ln -sf /etc/nginx/sites-available/gojo /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
+
 nginx -t
 service nginx restart
 ```
+
+#### Restart Load Balancer Internal Geto
+
+Geto bertugas menerima request API dari Gojo dan mendistribusikannya ke Nanami serta Todo menggunakan upstream `api_cluster` dengan algoritma Weighted Round Robin berbobot 3:1.
+
+**Kode pada Geto:**
+
 ```bash
-# geto: restart (upstream api_cluster sudah ada dari soal 15)
 service nginx restart
 ```
+
+Perintah ini menerapkan konfigurasi Nginx yang telah tersedia pada Geto. Konfigurasi upstream harus sudah dibuat dan diuji sebelumnya.
+
+### Pengujian
+
+#### Pengujian Round Robin Frontend
+
+Pengujian dilakukan pada Gojo dengan mengirimkan request ke root sebanyak 10 kali.
+
+**Kode pengujian:**
+
 ```bash
-# verifikasi
+for i in $(seq 1 10); do
+    curl -s http://localhost/ | grep -o 'Hostname: [a-z]*'
+done | sort | uniq -c
+```
 
-# gojo: cek round robin
-for i in $(seq 1 10); do curl -s http://localhost/ | grep -o 'Hostname: [a-z]*'; done | sort | uniq -c
+Hasil menunjukkan request root berhasil didistribusikan ke Maki dan Panda. Karena kedua server memiliki bobot default yang sama, distribusi yang mendekati seimbang diharapkan terjadi.
 
-# gojo: hasil lebih akurat
-for i in $(seq 1 100); do curl -s http://localhost/ | grep -o 'Hostname: [a-z]*'; done | sort | uniq -c
+Pengujian dapat diulang dengan 100 request:
 
-# gojo: cek /api
+```bash
+for i in $(seq 1 100); do
+    curl -s http://localhost/ | grep -o 'Hostname: [a-z]*'
+done | sort | uniq -c
+```
+
+#### Pengujian Path API dari Gojo
+
+**Kode pengujian:**
+
+```bash
 curl http://localhost/api
+```
 
-# client Divisi A/B (zenin / okkotsu / kugisaki)
+Respons dapat berasal dari Nanami atau Todo karena Geto meneruskan request ke upstream `api_cluster`. Field `hostname` menunjukkan backend yang memproses request. Isi `recent_logs` bergantung pada data yang tersimpan di database.
+
+#### Pengujian dari Client Divisi A atau B
+
+Pengujian dilakukan dari salah satu client, misalnya Zenin, Okkotsu, atau Kugisaki.
+
+**Menentukan DNS resolver:**
+
+```bash
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
+```
+
+**Menguji domain utama:**
+
+```bash
 curl http://jujutsu.k63.com/
 curl http://www.jujutsu.k63.com/
+```
+
+Hasil menunjukkan request ke domain utama diteruskan oleh Gojo ke frontend cluster.
+
+**Menguji layanan API:**
+
+```bash
 curl http://jujutsu.k63.com/api
 ```
+
+Respons API dapat berasal dari Nanami atau Todo. Hal ini menunjukkan bahwa request dari client melewati Gojo terlebih dahulu, kemudian diteruskan ke Geto untuk didistribusikan ke API worker.
 
 ## Soal 17
 
