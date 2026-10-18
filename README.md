@@ -1487,17 +1487,27 @@ Status `403 Forbidden` menunjukkan bahwa permintaan ditolak karena alamat IP Get
 
 ## Soal 15
 
-Load balancer API di geto dengan Nginx upstream, weight 3:1 untuk nanami dan todo. Semua perintah di geto.
+### Konfigurasi dan Implementasi
+
+#### Instalasi Nginx dan Curl
+
+Instalasi dilakukan pada Geto. Nginx digunakan sebagai Load Balancer, sedangkan Curl digunakan untuk mengirimkan request HTTP dan menguji distribusi beban.
+
+**Kode instalasi:**
 
 ```bash
-# geto: install Nginx dan curl
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
 apt-get update
 apt-get install -y nginx curl
 ```
-```bash
-# geto: upstream dan virtual host
-cat > /etc/nginx/sites-available/lb << 'ENDOFFILE'
+
+#### Konfigurasi Upstream dan Virtual Host
+
+Konfigurasi upstream dibuat pada file `/etc/nginx/sites-available/lb`. Upstream `api_cluster` berisi dua server backend, yaitu Nanami dan Todo.
+
+**Kode konfigurasi:**
+
+```nginx
 upstream api_cluster {
     server 10.95.4.5 weight=3;
     server 10.95.4.6 weight=1;
@@ -1514,39 +1524,104 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
-ENDOFFILE
 ```
+
+Penjelasan konfigurasi:
+
+- `upstream api_cluster` mendefinisikan kelompok server backend yang menerima request dari Load Balancer.
+- `server 10.95.4.5 weight=3` memberikan bobot 3 kepada Nanami.
+- `server 10.95.4.6 weight=1` memberikan bobot 1 kepada Todo.
+- `proxy_pass http://api_cluster` meneruskan request ke salah satu server dalam kelompok upstream.
+- `proxy_set_header` meneruskan informasi host dan alamat IP client ke backend.
+
+Nginx menggunakan Weighted Round Robin secara default ketika beberapa server upstream diberi bobot. Dengan bobot 3:1, distribusi request normal yang diharapkan adalah sekitar 75% menuju Nanami dan 25% menuju Todo.
+
+#### Mengaktifkan Konfigurasi
+
+Setelah file konfigurasi dibuat, konfigurasi diaktifkan melalui symbolic link. Konfigurasi default dinonaktifkan agar tidak berbenturan dengan virtual host Load Balancer.
+
+**Kode aktivasi:**
+
 ```bash
-# geto: aktifkan dan restart
 ln -sf /etc/nginx/sites-available/lb /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
+
 nginx -t
 service nginx restart
 ```
-```bash
-# geto: verifikasi distribusi beban
 
-# satu request berhasil
+Perintah `nginx -t` digunakan untuk memeriksa validitas sintaks konfigurasi sebelum Nginx dijalankan ulang.
+
+#### Pengujian Satu Request
+
+Pengujian awal dilakukan dari Geto untuk memastikan bahwa Load Balancer dapat meneruskan request ke backend.
+
+**Kode pengujian:**
+
+```bash
 curl http://localhost/
-
-# loop 20 request - cek rasio
-for i in $(seq 1 20); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
-
-# loop 40 request - hasil lebih akurat
-for i in $(seq 1 40); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
 ```
+
+Respons dapat berasal dari Nanami atau Todo, bergantung pada urutan distribusi request.
+
+#### engujian Distribusi 20 Request
+
+Pengujian dilakukan dengan mengirimkan 20 request secara berulang ke Geto. Nama hostname pada setiap respons diambil menggunakan `grep`, kemudian jumlah respons dari masing-masing backend dihitung menggunakan `sort` dan `uniq`.
+
+**Kode pengujian:**
+
 ```bash
-# geto: verifikasi tambahan
+for i in $(seq 1 20); do
+    curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'
+done | sort | uniq -c
+```
 
-# cek nginx listening
+#### Pengujian Distribusi 40 Request
+
+Untuk memperoleh sampel pengujian yang lebih besar, jumlah request ditingkatkan menjadi 40.
+
+**Kode pengujian:**
+
+```bash
+for i in $(seq 1 40); do
+    curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'
+done | sort | uniq -c
+```
+
+Perbandingan jumlah request adalah 30:10 atau 3:1.
+
+Persentase distribusi dihitung sebagai berikut:
+
+- Nanami: \(30/40 \times 100\% = 75\%\)
+- Todo: \(10/40 \times 100\% = 25\%\)
+
+Hasil tersebut sesuai dengan bobot yang ditentukan dalam konfigurasi upstream.
+
+#### Verifikasi Layanan dan Konfigurasi
+
+**Memeriksa port 80:**
+
+```bash
 ss -tlnp | grep :80
+```
 
-# cek config upstream
+Perintah tersebut digunakan untuk memastikan Nginx mendengarkan koneksi HTTP pada port 80.
+
+**Memeriksa konfigurasi upstream:**
+
+```bash
 nginx -T | grep -A5 upstream
+```
 
-# cek akses dari node lain di Network 4
+Perintah tersebut menampilkan bagian konfigurasi upstream yang sedang digunakan oleh Nginx.
+
+**Menguji akses dari node lain di jaringan Data Center:**
+
+```bash
 curl http://10.95.4.2/
 ```
+
+Pengujian ini memastikan bahwa Geto dapat diakses melalui alamat IPnya dari node lain. Keberhasilan pengujian bergantung pada konfigurasi jaringan dan aturan firewall yang berlaku.
 
 ## Soal 16
 
