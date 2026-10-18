@@ -1830,22 +1830,37 @@ Respons API dapat berasal dari Nanami atau Todo. Hal ini menunjukkan bahwa reque
 
 ## Soal 17
 
-Meneruskan IP client asli lewat header `X-Forwarded-For` dari gojo, geto, sampai API worker, lalu disimpan ke database.
+### Konfigurasi dan Implementasi
+
+#### Konfigurasi Alamat IP Client
+
+Alamat IP client perlu dipastikan sebelum pengujian agar alamat yang tersimpan di database dapat dibandingkan dengan alamat asli masing-masing client.
+
+**Pada Ino (Network 3):**
 
 ```bash
-# ino (Network 3): set IP manual kalau belum dapat DHCP
 ip addr add 10.95.3.2/24 dev eth0
 ip link set eth0 up
 ip route add default via 10.95.3.1
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
-ip addr show eth0 | grep inet    # HARUS 10.95.3.2/24
-
-# zenin (Network 2): sudah DHCP, cek saja
-ip addr show eth0 | grep inet    # HARUS 10.95.2.4
+ip addr show eth0 | grep inet
 ```
+
+**Pada Zenin (Network 2):**
+
 ```bash
-# gojo: teruskan header client IP
-cat > /etc/nginx/sites-available/gojo << 'ENDOFFILE'
+ip addr show eth0 | grep inet
+```
+
+Zenin diharapkan menggunakan IP `10.95.2.4`, sedangkan Ino menggunakan IP `10.95.3.2`.
+
+#### Konfigurasi Gojo untuk Meneruskan Header Client
+
+Gojo meneruskan request ke frontend worker atau Geto. Header `X-Real-IP` digunakan untuk membawa alamat IP client, sedangkan `X-Forwarded-For` menyimpan rantai alamat IP yang dilewati request.
+
+**Kode konfigurasi `/etc/nginx/sites-available/gojo`:**
+
+```nginx
 upstream frontend_cluster {
     server 10.95.4.3;
     server 10.95.4.4;
@@ -1855,7 +1870,6 @@ server {
     listen 80;
     server_name jujutsu.k63.com www.jujutsu.k63.com;
 
-    # Percayai informasi IP dari proxy terpercaya
     set_real_ip_from 10.95.0.0/16;
     set_real_ip_from 192.168.122.0/24;
     real_ip_header X-Forwarded-For;
@@ -1875,13 +1889,23 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
-ENDOFFILE
+```
 
+Direktif `proxy_set_header X-Real-IP $remote_addr` meneruskan alamat client yang terlihat oleh Gojo. Sementara itu, `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` menambahkan alamat tersebut ke rantai header `X-Forwarded-For`.
+
+**Validasi dan restart Nginx pada Gojo:**
+
+```bash
 nginx -t && service nginx restart
 ```
-```bash
-# geto: hanya percayai proxy terpercaya (gojo)
-cat > /etc/nginx/sites-available/lb << 'ENDOFFILE'
+
+#### Konfigurasi Geto sebagai Load Balancer Internal
+
+Geto hanya mempercayai Gojo dengan alamat IP `10.95.1.4` sebagai proxy yang berwenang memberikan informasi IP client. Geto kemudian meneruskan informasi tersebut ke API worker.
+
+**Kode konfigurasi `/etc/nginx/sites-available/lb`:**
+
+```nginx
 upstream api_cluster {
     server 10.95.4.5 weight=3;
     server 10.95.4.6 weight=1;
@@ -1891,7 +1915,6 @@ server {
     listen 80;
     server_name geto.jujutsu.k63.com;
 
-    # HANYA gojo yang dipercayai sebagai proxy
     set_real_ip_from 10.95.1.4;
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
@@ -1903,13 +1926,25 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
-ENDOFFILE
+```
 
+Direktif `set_real_ip_from 10.95.1.4` menentukan proxy terpercaya. Modul Real IP Nginx menggunakan header `X-Forwarded-For` dari proxy tersebut untuk menentukan alamat client yang sebenarnya. Direktif `real_ip_recursive on` membantu memilih alamat nontepercaya yang tepat dari rantai header.
+
+Setelah alamat client diverifikasi, `$remote_addr` digunakan untuk meneruskan alamat tersebut ke API worker melalui `X-Real-IP`. Header `X-Forwarded-For` tetap diteruskan untuk menyimpan informasi rantai proxy.
+
+**Validasi dan restart Nginx pada Geto:**
+
+```bash
 nginx -t && service nginx restart
 ```
-```bash
-# nanami, todo, DAN kirara: simpan IP terverifikasi
-cat > /var/www/api/index.php << 'ENDOFFILE'
+
+#### Konfigurasi API Worker untuk Mencatat IP Client
+
+Konfigurasi berikut diterapkan pada Nanami, Todo, dan Kirara. API worker menerima request, menentukan alamat client, lalu menyimpan alamat tersebut ke database Yaga.
+
+**Kode `/var/www/api/index.php`:**
+
+```php
 <?php
 header('Content-Type: application/json');
 
@@ -1962,16 +1997,27 @@ echo json_encode([
     "client_ip" => $client_ip,
     "recent_logs" => $logs
 ]);
-ENDOFFILE
+```
 
+Kode tersebut memeriksa format alamat IP melalui `FILTER_VALIDATE_IP` dan hanya menggunakan `X-Real-IP` jika koneksi berasal dari alamat proxy yang tercantum pada daftar kepercayaan. Jika tidak memenuhi syarat, aplikasi menggunakan alamat koneksi langsung dari `REMOTE_ADDR`.
+
+**Validasi sintaks PHP:**
+
+```bash
 php -l /var/www/api/index.php
 ```
-```bash
-# nanami, todo, DAN kirara: pastikan config nginx API sudah handle /api (soal 16)
-cat > /etc/nginx/sites-available/api << 'ENDOFFILE'
+
+#### Konfigurasi Virtual Host API Worker
+
+API worker perlu mengarahkan request yang tidak menunjuk ke file fisik ke `index.php`, sehingga endpoint `/api` dapat diproses oleh aplikasi PHP.
+
+**Kode konfigurasi pada Nanami, Todo, dan Kirara:**
+
+```nginx
 server {
     listen 80;
     server_name api.jujutsu.k63.com;
+
     root /var/www/api;
     index index.php;
 
@@ -1987,27 +2033,52 @@ server {
     allow 10.95.4.2;
     deny all;
 }
-ENDOFFILE
+```
 
+Simpan konfigurasi tersebut pada `/etc/nginx/sites-available/api`, kemudian jalankan:
+
+```bash
 nginx -t && service nginx restart
 ```
-```bash
-# verifikasi dari client Network 2 dan 3
 
-# zenin (Network 2)
+Aturan akses mengizinkan request langsung ke API worker hanya dari Geto (`10.95.4.2`). Karena itu, API worker tidak seharusnya menerima request langsung dari Zenin atau Ino.
+
+### Pengujian 
+
+#### Pengujian dari Zenin (Network 2)
+
+**Perintah:**
+
+```bash
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
 curl http://jujutsu.k63.com/api
-# HARUS: "client_ip":"10.95.2.4"
+```
 
-# ino (Network 3)
+Alamat `10.95.2.4` menunjukkan IP Zenin yang diharapkan tercatat sebagai client, bukan IP Gojo atau Geto.
+
+#### Pengujian dari Ino (Network 3)
+
+**Perintah:**
+
+```bash
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
 curl http://jujutsu.k63.com/api
-# HARUS: "client_ip":"10.95.3.2"
 ```
+
+Alamat `10.95.3.2` menunjukkan IP Ino yang diharapkan tercatat sebagai client. Hostname dapat berupa Nanami atau Todo karena request didistribusikan oleh Geto.
+
+#### Verifikasi Data pada Database Yaga
+
+Pemeriksaan dilakukan dengan menjalankan query pada database `db_shibuya_k63`.
+
+**Perintah:**
+
 ```bash
-# yaga: cek database
-mysql -h 10.95.4.9 -u root -proot_password db_shibuya_k63 -e "SELECT * FROM request_logs ORDER BY id DESC LIMIT 10;"
+mysql -h 10.95.4.9 -u root -proot_password db_shibuya_k63 \
+-e "SELECT id, client_ip, endpoint, timestamp FROM request_logs ORDER BY id DESC LIMIT 10;"
 ```
+
+Hasil menunjukkan alamat IP client Network 2 dan Network 3 tersimpan pada kolom `client_ip`. 
 
 ## Soal 18
 
