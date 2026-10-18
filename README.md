@@ -2252,17 +2252,26 @@ Langkah ini bertujuan untuk memastikan worker utama dapat kembali melayani reque
 
 ## Soal 19
 
-Caching halaman frontend dan rate limiting API di gojo.
+### Konfigurasi dan Implementasi
+
+#### Membuat Direktori Cache
+
+Langkah pertama adalah membuat direktori untuk menyimpan cache halaman frontend pada server Gojo.
 
 ```bash
-# gojo: direktori cache
 mkdir -p /var/cache/nginx/frontend
 chown -R www-data:www-data /var/cache/nginx
 ```
-```bash
-# gojo: konfigurasi
-# catatan: proxy_cache_path dan limit_req_zone HARUS di luar blok server{}
-cat > /etc/nginx/sites-available/gojo << 'ENDOFFILE'
+
+Perintah `mkdir -p` digunakan untuk membuat direktori cache jika belum tersedia. Sementara itu, `chown` digunakan untuk memberikan kepemilikan direktori kepada pengguna dan grup `www-data`, sehingga Nginx dapat mengakses direktori tersebut.
+
+#### Konfigurasi Nginx pada Gojo
+
+Konfigurasi Nginx pada Gojo diubah untuk menerapkan proxy caching pada halaman frontend dan rate limiting pada endpoint `/api`.
+
+Berkas konfigurasi `/etc/nginx/sites-available/gojo`:
+
+```nginx
 proxy_cache_path /var/cache/nginx/frontend levels=1:2 keys_zone=frontend_cache:10m max_size=1g inactive=60m;
 
 limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
@@ -2303,49 +2312,88 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
-ENDOFFILE
+```
 
+Penjelasan konfigurasi:
+
+- `proxy_cache_path` menentukan lokasi penyimpanan cache, nama zona cache, ukuran maksimum, dan periode tidak aktif cache.
+- `proxy_cache_valid 200 10m` menentukan masa berlaku cache selama 10 menit untuk respons HTTP `200`.
+- `proxy_cache_key` menentukan identitas cache berdasarkan skema, metode request, host, dan URI.
+- `add_header X-Cache-Status $upstream_cache_status` menambahkan header yang menunjukkan status cache dari upstream.
+- `limit_req_zone` membuat zona pembatasan request berdasarkan `$binary_remote_addr` dengan batas rata-rata 10 request per detik.
+- `burst=5` mengizinkan lonjakan hingga lima request tambahan yang menunggu atau diproses sesuai konfigurasi.
+- `nodelay` membuat request dalam batas burst yang tersedia tidak mengalami penundaan akibat mekanisme antrean.
+- `limit_req_status 429` menetapkan kode HTTP `429` untuk request yang ditolak karena melampaui batas.
+- `proxy_set_header X-Real-IP` dan `proxy_set_header X-Forwarded-For` meneruskan informasi alamat klien ke server tujuan.
+
+Setelah konfigurasi selesai, lakukan pengujian sintaks dan restart Nginx:
+
+```bash
 nginx -t && service nginx restart
 ```
+
+#### Verifikasi Proxy Caching
+
+Sebelum pengujian, cache dibersihkan terlebih dahulu pada Gojo:
+
 ```bash
-# verifikasi caching (MISS -> HIT)
-
-# gojo: hapus cache dulu
 rm -rf /var/cache/nginx/frontend/*
+```
 
-# client (zenin / ino / kusakabe)
+Selanjutnya, dari klien Zenin, Ino, atau Kusakabe, atur DNS dan kirimkan request ke halaman frontend:
+
+```bash
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
 
 curl -I http://jujutsu.k63.com/
 curl -I http://jujutsu.k63.com/
 curl -I http://jujutsu.k63.com/
-
-# HARUS:
-# Request 1 -> X-Cache-Status: MISS
-# Request 2 -> X-Cache-Status: HIT
-# Request 3 -> X-Cache-Status: HIT
 ```
+
+Header `X-Cache-Status` digunakan untuk memeriksa apakah respons diambil dari upstream atau dari cache Nginx.
+
+HASIL HARUS:
+- Request 1 -> X-Cache-Status: MISS
+- Request 2 -> X-Cache-Status: HIT
+- Request 3 -> X-Cache-Status: HIT
+
+#### Verifikasi Rate Limiting
+
+Pengujian rate limiting dilakukan dari klien Zenin dengan mengirimkan 50 request secara beruntun ke endpoint `/api`:
+
 ```bash
-# verifikasi rate limiting (client zenin)
 for i in $(seq 1 50); do curl -s -o /dev/null -w "%{http_code} " http://jujutsu.k63.com/api; done; echo
-
-# HARUS: muncul beberapa 200 lalu banyak 429
 ```
+
+Perintah tersebut menampilkan kode HTTP dari setiap request tanpa mencetak isi respons. Dengan demikian, kode `200` dan `429` dapat diamati secara langsung.
+
+#### Pemeriksaan dan Pembersihan Cache
+
+Untuk memeriksa file cache yang tersimpan, jalankan pada Gojo:
+
 ```bash
-# gojo: utility cek dan clear cache
-
-# cek isi cache
 ls -la /var/cache/nginx/frontend/
+```
 
-# cek ukuran cache
+Untuk melihat ukuran direktori cache:
+
+```bash
 du -sh /var/cache/nginx/frontend/
+```
 
-# clear cache (untuk test ulang MISS)
+Untuk membersihkan cache agar pengujian dapat dimulai kembali dari kondisi awal:
+
+```bash
 rm -rf /var/cache/nginx/frontend/*
+```
 
-# cek log error rate limit
+Pemeriksaan log error Nginx dilakukan dengan perintah:
+
+```bash
 tail -20 /var/log/nginx/error.log
 ```
+
+Log tersebut dapat membantu mengidentifikasi request yang ditolak oleh mekanisme rate limiting.
 
 ## Soal 20
 
