@@ -2082,31 +2082,52 @@ Hasil menunjukkan alamat IP client Network 2 dan Network 3 tersimpan pada kolom 
 
 ## Soal 18
 
-Failover: kirara dijadikan `backup` di upstream geto, aktif hanya saat nanami dan todo mati.
+### Konfigurasi dan Implementasi
+
+#### Memastikan Layanan API pada Kirara Berjalan
+
+Memastikan Kirara memiliki alamat IP yang sesuai serta layanan Nginx dan PHP-FPM berjalan dengan baik.
+
+Konfigurasi alamat IP dan routing pada Kirara:
 
 ```bash
-# kirara: pastikan API berjalan (prasyarat: kirara sudah dikonfigurasi di soal 14)
 ip addr add 10.95.4.7/24 dev eth0 2>/dev/null
 ip link set eth0 up
 ip route add default via 10.95.4.1 2>/dev/null
+```
 
-# cek status
+Pemeriksaan status jaringan dan layanan:
+
+```bash
 ip addr show eth0 | grep inet
 ps aux | grep nginx | head -2
 ps aux | grep php-fpm | head -2
 ls -la /run/php/php8.4-fpm.sock
 ls -la /var/www/api/index.php
+```
 
-# kalau php-fpm mati
+Apabila PHP-FPM belum berjalan, jalankan perintah berikut:
+
+```bash
 /usr/sbin/php-fpm8.4 -D
 service nginx restart
+```
 
-# cek config kirara sudah allow geto
+Selanjutnya, periksa aturan akses pada konfigurasi API:
+
+```bash
 grep -n "allow\|deny" /etc/nginx/sites-available/api
 ```
-```bash
-# geto: upstream dengan backup dan health check
-cat > /etc/nginx/sites-available/lb << 'ENDOFFILE'
+
+Pemeriksaan ini dilakukan untuk memastikan Kirara memiliki berkas API, socket PHP-FPM, dan konfigurasi akses yang diperlukan agar dapat melayani request seperti worker API utama.
+
+#### Konfigurasi Upstream pada Geto
+
+Konfigurasi upstream pada Geto diubah agar Nanami dan Todo tetap menjadi worker utama, sedangkan Kirara menjadi worker cadangan.
+
+Berkas konfigurasi `/etc/nginx/sites-available/lb`:
+
+```nginx
 upstream api_cluster {
     server 10.95.4.5 weight=3 max_fails=2 fail_timeout=5s;
     server 10.95.4.6 weight=1 max_fails=2 fail_timeout=5s;
@@ -2128,55 +2149,106 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
-ENDOFFILE
+```
 
+Penjelasan konfigurasi:
+
+- **Nanami (`10.95.4.5`)** menjadi worker utama dengan bobot `3`, sehingga memperoleh proporsi request lebih besar dibandingkan Todo ketika keduanya tersedia.
+- **Todo (`10.95.4.6`)** menjadi worker utama dengan bobot `1`.
+- **Kirara (`10.95.4.7`)** ditetapkan sebagai server `backup`. Server ini digunakan ketika worker utama tidak tersedia menurut mekanisme pemilihan upstream Nginx.
+- `max_fails=2` menentukan jumlah kegagalan yang diperhitungkan sebelum server dianggap tidak tersedia.
+- `fail_timeout=5s` menentukan periode penghitungan kegagalan sekaligus waktu server dianggap tidak tersedia setelah mencapai batas kegagalan.
+- `set_real_ip_from 10.95.1.4` menetapkan alamat Gojo sebagai proxy yang dipercaya untuk informasi IP klien.
+- `real_ip_header X-Forwarded-For` dan `real_ip_recursive on` digunakan untuk memproses alamat klien dari header yang diteruskan proxy.
+
+Setelah konfigurasi selesai, lakukan pemeriksaan dan restart Nginx:
+
+```bash
 nginx -t && service nginx restart
 ```
+
+#### Pengujian Kondisi Normal
+
+Sebelum melakukan simulasi gangguan, Kirara diuji secara langsung dari Geto:
+
 ```bash
-# geto: baseline sebelum gangguan
-
-# test kirara langsung (hostname: kirara)
 curl http://10.95.4.7/
+```
 
-# distribusi normal (harus nanami + todo saja)
+Selanjutnya, pengujian distribusi request dilakukan melalui upstream:
+
+```bash
 for i in $(seq 1 10); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
 ```
+
+Pengujian ini bertujuan untuk memeriksa hostname worker yang memberikan respons ketika Nanami dan Todo masih aktif. Dalam kondisi normal, request seharusnya dilayani oleh worker utama, sedangkan Kirara tetap menjadi cadangan.
+
+#### Simulasi Gangguan pada Worker Utama
+
+Untuk menguji mekanisme failover, layanan Nginx pada Nanami dihentikan:
+
 ```bash
-# simulasi gangguan
-
-# nanami
-service nginx stop
-ps aux | grep nginx | grep -v grep
-
-# todo
 service nginx stop
 ps aux | grep nginx | grep -v grep
 ```
+
+Lakukan langkah yang sama pada Todo:
+
 ```bash
-# geto: buktikan failover ke kirara (tunggu ~5 detik / fail_timeout dulu)
+service nginx stop
+ps aux | grep nginx | grep -v grep
+```
+
+Dengan kedua worker utama dihentikan, Geto tidak dapat menggunakan Nanami dan Todo untuk melayani request. Oleh karena itu, Kirara diharapkan mengambil alih layanan sebagai worker cadangan.
+
+#### Pengujian Failover ke Kirara
+
+Setelah layanan worker utama dihentikan, tunggu sekitar lima detik sesuai parameter `fail_timeout`, lalu uji endpoint dari Geto:
+
+```bash
 sleep 5
 curl http://localhost/
 curl http://localhost/api
+```
 
-# loop - semua harus kirara
+Kemudian, kirim beberapa request untuk memeriksa hostname worker yang merespons:
+
+```bash
 for i in $(seq 1 10); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
+```
 
-# dari client (zenin)
+Pengujian dari klien Zenin pada Network 2 dilakukan menggunakan:
+
+```bash
 curl http://jujutsu.k63.com/api
 for i in $(seq 1 10); do curl -s http://jujutsu.k63.com/api | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
 ```
+
+Pengujian ini digunakan untuk memastikan request dari klien tetap mendapatkan respons dari Kirara ketika kedua worker utama tidak tersedia.
+
+#### Pemulihan Layanan
+
+Setelah pengujian selesai, layanan Nginx pada Nanami dan Todo dijalankan kembali.
+
+Pada Nanami:
+
 ```bash
-# pulihkan layanan
-
-# nanami
 service nginx start
+```
 
-# todo
+Pada Todo:
+
+```bash
 service nginx start
+```
 
-# geto: harus kembali ke nanami/todo
+Selanjutnya, periksa kembali distribusi request melalui Geto:
+
+```bash
 for i in $(seq 1 10); do curl -s http://localhost/ | grep -o '"hostname":"[^"]*"'; done | sort | uniq -c
 ```
+
+Langkah ini bertujuan untuk memastikan worker utama dapat kembali melayani request setelah pulih.
 
 ## Soal 19
 
