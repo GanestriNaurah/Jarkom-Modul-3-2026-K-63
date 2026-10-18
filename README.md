@@ -2397,59 +2397,126 @@ Log tersebut dapat membantu mengidentifikasi request yang ditolak oleh mekanisme
 
 ## Soal 20
 
-Benchmark dengan Apache Benchmark (`ab`) dari kusakabe ke gojo, lalu analisis access log.
+### Konfigurasi dan Implementasi
+
+#### Persiapan Kusakabe
+
+Langkah pertama adalah mengatur DNS agar Kusakabe menggunakan Utahime sebagai DNS server.
 
 ```bash
-# kusakabe (Alpine): persiapan
-
-# set DNS ke utahime
 echo "nameserver 10.95.1.2" > /etc/resolv.conf
+```
 
-# cek IP address
+Selanjutnya, periksa alamat IP Kusakabe:
+
+```bash
 ip addr show eth0 | grep inet
-# HARUS: inet 10.95.3.3/24
+```
 
-# kalau belum ada IP, set manual
+Alamat IP yang diharapkan adalah `10.95.3.3/24`. Jika alamat tersebut belum tersedia, jalankan konfigurasi berikut:
+
+```bash
 ip addr add 10.95.3.3/24 dev eth0
 ip link set eth0 up
 ip route add default via 10.95.3.1
+```
 
-# install Apache Benchmark
+Apache Benchmark diinstal menggunakan perintah:
+
+```bash
 apk update
 apk add apache2-utils
-
-# verifikasi
-ab -V
-# Output: This is ApacheBench, Version 2.3
 ```
+
+Setelah instalasi selesai, periksa versi Apache Benchmark:
+
 ```bash
-# kusakabe: benchmark baseline - halaman web "/"
+ab -V
+```
+
+Output:
+
+```text
+This is ApacheBench, Version 2.3
+```
+
+#### Benchmark Baseline pada Halaman Web
+
+Pengujian pertama dilakukan pada halaman utama `/` untuk memperoleh gambaran performa layanan web.
+
+```bash
 ab -n 600 -c 30 http://jujutsu.k63.com/
 ```
+
+Parameter yang digunakan:
+
+- `-n 600`: jumlah total request yang dikirim adalah 600.
+- `-c 30`: jumlah request konkuren yang digunakan adalah 30.
+- `http://jujutsu.k63.com/`: alamat halaman web yang diuji.
+
+Hasil benchmark digunakan untuk mencatat Requests per Second (RPS), waktu respons, serta jumlah request yang gagal.
+
+#### Benchmark pada Endpoint API
+
+Pengujian kedua dilakukan pada endpoint `/api` yang menggunakan rate limiting.
+
 ```bash
-# kusakabe: benchmark dengan rate limiting aktif - "/api"
 ab -n 600 -c 30 http://jujutsu.k63.com/api
 ```
+
+Pengujian ini bertujuan untuk melihat performa endpoint API ketika menerima request secara bersamaan dan mengamati apakah terdapat request yang ditolak karena kebijakan rate limiting.
+
+#### Pengujian Alternatif Menggunakan Alamat IP
+
+Sebagai pengujian tambahan, benchmark dilakukan langsung menggunakan alamat IP Gojo.
+
 ```bash
-# kusakabe: benchmark via IP (alternatif / bukti tambahan)
 ab -n 600 -c 30 http://10.95.1.4/
 ab -n 600 -c 30 http://10.95.1.4/api
 ```
+
+Pengujian melalui alamat IP dapat digunakan sebagai pembanding. Namun, hasilnya belum tentu identik dengan akses menggunakan nama domain karena konfigurasi `server_name`, virtual host, DNS, dan header Host dapat memengaruhi pemilihan server tujuan.
+
+#### Analisis Access Log Gojo
+
+Setelah benchmark selesai, pemeriksaan dilakukan pada Gojo untuk mengetahui distribusi kode respons yang tercatat pada access log.
+
+**a. Menghitung kode respons**
+
 ```bash
-# gojo: analisis access log
-
-# hitung response code dari benchmark terakhir
 tail -1200 /var/log/nginx/access.log | awk '{print $9}' | sort | uniq -c | sort -rn
+```
 
-# lihat request yang DITOLAK rate limit
+Perintah tersebut mengambil 1.200 baris terakhir access log, mengambil kolom kesembilan yang umumnya berisi status HTTP, lalu menghitung jumlah setiap kode respons.
+
+**b. Memeriksa request yang ditolak rate limiting**
+
+```bash
 grep " 429 " /var/log/nginx/access.log | tail -10
+```
 
-# cek kegagalan APLIKASI (5xx)
+Kode HTTP `429` menunjukkan bahwa request ditolak karena terlalu banyak request menurut kebijakan rate limiting.
+
+**c. Memeriksa respons kegagalan aplikasi atau server**
+
+```bash
 grep -E " 5[0-9][0-9] " /var/log/nginx/access.log | tail -10
+```
 
-# cek request ke "/" (harus semua 200)
+Perintah ini menampilkan request yang menghasilkan kode HTTP `5xx`, misalnya `500`, `502`, atau `503`.
+
+**d. Memeriksa respons halaman utama**
+
+```bash
 grep "GET / HTTP" /var/log/nginx/access.log | tail -10 | awk '{print $9}' | sort | uniq -c
+```
 
-# cek kegagalan koneksi di error log
+Pemeriksaan ini digunakan untuk melihat kode respons dari request ke halaman utama `/`. Harus semua 200.
+
+**e. Memeriksa error log**
+
+```bash
 tail -20 /var/log/nginx/error.log
 ```
+
+Error log digunakan untuk mencari indikasi masalah koneksi ke upstream, seperti koneksi ditolak atau upstream tidak dapat dijangkau.
